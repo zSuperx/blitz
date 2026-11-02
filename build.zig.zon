@@ -1,0 +1,13 @@
+.{
+    .name = .zb,
+    .version = "0.0.1",
+    .dependencies = .{
+        .llvm = .{
+            .url = "git+https://github.com/kassane/llvm-zig#f56b9f09c4a100de61eeb7afe39d633b7adb183a",
+            .hash = "llvm_zig-1.0.0-IXgkxN_5BADX7hYPlnstvgVKeqR_QhT6msse6U-p0PfJ",
+        },
+    },
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0x37b583f7f26a4781,
+}

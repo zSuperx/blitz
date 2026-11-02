@@ -1,0 +1,7 @@
+*.ll
+*.s
+a.out
+
+zig-out/
+zig-pkg/
+.zig-cache/
