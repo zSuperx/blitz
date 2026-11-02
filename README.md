@@ -8,8 +8,8 @@ hands-on experience with the LLVM API.
 
 # Language
 
-ZB is similar to B. It currently has only 1 type: `u64`. There are no type
-annotations, as every type is inferred to be a `u64`.
+ZB is similar to B. It currently has only 1 type: `i64`. There are no type
+annotations, as every type is inferred to be a `i64`.
 
 _(I will add more types + an actual type checking phase later when I get time.)_
 
