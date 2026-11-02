@@ -28,9 +28,11 @@ fn main() {
 
 # Compiler Usage
 
-Since zb is just a frontend for LLVM, `llvm` is required to both build and run
-this compiler. The `flake.nix` includes a devShell that provides
-`pkgs.llvmPackages_21.llvm`, which exposes `libllvm.so`, `llc`, and `opt`.
+Since `zb` is just a frontend for LLVM, `libllvm` is required to build this
+compiler, while `clang` is required to compile `zb`'s output (LLVM IR) into
+machine code. The `flake.nix` in this repository includes a devShell that
+provides `pkgs.llvmPackages_21.llvm`, which exposes `libllvm.so`. I'm leaving
+it up to you to get `clang`.
 
 _(I will implement a custom backend when I get time)_
 
@@ -41,8 +43,8 @@ while I was drunk lol.
 
 Also as per the Zig philosophy, there is zero AI generated code in this
 repository. However, I did use it to sift through `llvm-zig`'s generated
-bindings since the names didn't line up with the Kaleidoscope tutorial, which
-was kind of annoying.
+bindings since the names didn't line up with the Kaleidoscope tutorial. This
+helped me save some time, but had no effect on the code I wrote.
 
 # Credits
 
