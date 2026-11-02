@@ -20,8 +20,8 @@ fn add(a, b) {
 }
 
 fn main() {
-  let a = 5;
-  let b = 6;
+  let a = 34;
+  let b = 35;
   return add(a, b);
 }
 ```
