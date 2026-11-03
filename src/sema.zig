@@ -151,6 +151,7 @@ pub const Sema = struct {
         }
 
         if (block.tail) |tail| {
+            tail.is_tail = true;
             try self.sema_expr(tail);
         }
 

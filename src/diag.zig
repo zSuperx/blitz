@@ -46,7 +46,7 @@ pub const Source = struct {
         ezio.print("^", .{});
 
         const lo = diag.span.lo;
-        const hi = @max(diag.span.lo, diag.span.hi -| 1);
+        const hi = @min(eol, @max(diag.span.lo, diag.span.hi -| 1));
         for (lo..hi) |_| {
             ezio.print("~", .{});
         }

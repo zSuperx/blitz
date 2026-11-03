@@ -115,6 +115,7 @@ pub const Expr = struct {
     },
     span: diag.Span,
     is_stmt: bool = false,
+    is_tail: bool = false,
 
     pub fn as_if_else(self: *Expr) ?*IfElseExpr {
         switch (self.kind) {
