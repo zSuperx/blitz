@@ -9,10 +9,10 @@ const sema = root.sema;
 const Symbol = sema.Symbol;
 const BaseSymbolInfo = sema.SymbolInfo;
 
-const LLVMValue = llvm.types.LLVMOpaqueValue;
+const LLVMValueRef = llvm.types.LLVMValueRef;
 const LLVMSymbolInfo = struct {
     base: BaseSymbolInfo,
-    value: ?*LLVMValue = null,
+    value: LLVMValueRef = null,
     type_: ?*llvm.types.LLVMOpaqueType = null,
 };
 
@@ -66,7 +66,7 @@ pub const Codegen = struct {
     // L-Value Expression code generation
     //
 
-    fn gen_variable_expr_lvalue(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_variable_expr_lvalue(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const variable = &expr.kind.variable;
         const info = self.symbol_table.getEntry(variable.symbol.?).?;
         if (info.value_ptr.value) |value| {
@@ -76,7 +76,7 @@ pub const Codegen = struct {
         }
     }
 
-    fn gen_expr_lvalue(self: *Codegen, expr: *ast.Expr) CodegenError!*LLVMValue {
+    fn gen_expr_lvalue(self: *Codegen, expr: *ast.Expr) CodegenError!LLVMValueRef {
         switch (expr.kind) {
             .variable => return self.gen_variable_expr_lvalue(expr),
             else => return error.InvalidLValue,
@@ -87,7 +87,7 @@ pub const Codegen = struct {
     // R-Value Expression code generation
     //
 
-    fn gen_expr_rvalue(self: *Codegen, expr: *ast.Expr) CodegenError!*LLVMValue {
+    fn gen_expr_rvalue(self: *Codegen, expr: *ast.Expr) CodegenError!LLVMValueRef {
         switch (expr.kind) {
             .number => return self.gen_number_expr(expr),
             .binary => return self.gen_binary_expr(expr),
@@ -102,7 +102,7 @@ pub const Codegen = struct {
         }
     }
 
-    fn gen_if_else_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_if_else_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const if_else = &expr.kind.ifelse;
 
         const fn_info = self.symbol_table.getEntry(self.current_function).?.value_ptr;
@@ -117,7 +117,7 @@ pub const Codegen = struct {
         const cmp_value = core.LLVMBuildIsNotNull(self.builder, cond_value, "cond");
         _ = core.LLVMBuildCondBr(self.builder, cmp_value, then_block, else_block);
 
-        var incoming_values = std.ArrayList(*LLVMValue).empty;
+        var incoming_values = std.ArrayList(LLVMValueRef).empty;
         var incoming_blocks = std.ArrayList(?@TypeOf(then_block)).empty;
 
         // THEN
@@ -166,12 +166,12 @@ pub const Codegen = struct {
         }
     }
 
-    fn gen_call_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_call_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const call = &expr.kind.call;
 
         const callee_value = try self.gen_expr_lvalue(call.callee);
 
-        var arg_values = std.ArrayList(?*LLVMValue).empty;
+        var arg_values = std.ArrayList(?LLVMValueRef).empty;
 
         var arg_types = std.ArrayList(*llvm.types.LLVMOpaqueType).empty;
 
@@ -186,7 +186,7 @@ pub const Codegen = struct {
         return core.LLVMBuildCall2(self.builder, function_type, callee_value, @ptrCast(arg_values.items), @intCast(arg_values.items.len), "").?;
     }
 
-    fn gen_block_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_block_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const block = &expr.kind.block;
         for (block.stmts) |inner_stmt| {
             _ = try self.gen_stmt(inner_stmt);
@@ -198,7 +198,7 @@ pub const Codegen = struct {
         }
     }
 
-    fn gen_assign_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_assign_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const assign = &expr.kind.assign;
 
         const left = try self.gen_expr_lvalue(assign.left);
@@ -209,7 +209,7 @@ pub const Codegen = struct {
         return llvm_zero;
     }
 
-    fn gen_variable_expr_rvalue(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_variable_expr_rvalue(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const variable = &expr.kind.variable;
         const info = self.symbol_table.getEntry(variable.symbol.?).?;
         if (info.value_ptr.value) |value| {
@@ -219,13 +219,13 @@ pub const Codegen = struct {
         }
     }
 
-    fn gen_number_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_number_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         _ = self;
         const number = expr.kind.number;
         return core.LLVMConstInt(llvm_i64, @truncate(number), 0).?;
     }
 
-    fn gen_unary_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_unary_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const unary = &expr.kind.unary;
 
         const inner_value = try self.gen_expr_rvalue(unary.inner);
@@ -236,7 +236,7 @@ pub const Codegen = struct {
         }
     }
 
-    fn gen_cmp_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_cmp_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const cmp = &expr.kind.cmp;
 
         const left_value = try self.gen_expr_rvalue(cmp.left);
@@ -250,7 +250,7 @@ pub const Codegen = struct {
         }
     }
 
-    fn gen_logic_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_logic_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const logic = &expr.kind.logic;
 
         const left_value = try self.gen_expr_rvalue(logic.left);
@@ -262,7 +262,7 @@ pub const Codegen = struct {
         }
     }
 
-    fn gen_binary_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+    fn gen_binary_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const binary = &expr.kind.binary;
 
         const left_value = try self.gen_expr_rvalue(binary.left);
@@ -373,7 +373,7 @@ pub const Codegen = struct {
 
         // Add value bindings for each argument
         for (function.arguments, 0..) |arg, i| {
-            // Move each argument onto the stack and use the alloca pointer as the symbol's LLVMValue.
+            // Move each argument onto the stack and use the alloca pointer as the symbol'sLLVMValueRef.
             const arg_name = try std.fmt.allocPrintSentinel(self.allocator, "{f}", .{arg}, 0);
             const arg_ptr = core.LLVMBuildAlloca(self.builder, llvm_i64, arg_name).?;
             const arg_value = core.LLVMGetParam(function_value, @intCast(i)).?;
@@ -388,8 +388,6 @@ pub const Codegen = struct {
         if (core.LLVMGetBasicBlockTerminator(bb) == null) {
             _ = core.LLVMBuildRet(self.builder, tail);
         }
-
-        _ = llvm.analysis.LLVMVerifyFunction(function_value, .LLVMPrintMessageAction);
     }
 
     pub fn gen_program(self: *Codegen, program: *ast.Program) ![:0]const u8 {
@@ -413,6 +411,11 @@ pub const Codegen = struct {
         for (program.functions) |function| {
             try self.gen_function(function);
         }
+
+        var message: [*c]u8 = null;
+
+        const status = llvm.analysis.LLVMVerifyModule(self.module, .LLVMReturnStatusAction, &message);
+        if (status != 0) std.log.err("LLVM ERROR: {s}", .{message});
 
         const module_string = core.LLVMPrintModuleToString(self.module);
         return std.mem.span(module_string);

@@ -25,6 +25,7 @@ pub const Parser = struct {
     cursor: usize = 0,
     allocator: std.mem.Allocator,
     last_span: diag.Span = .zeroed,
+    last_token: ?Token = null,
 
     pub fn init(allocator: std.mem.Allocator, string_pool: *sp.StringPool) @This() {
         return .{
@@ -89,9 +90,12 @@ pub const Parser = struct {
     }
 
     /// Returns next token and consumes it.
-    fn next_tok(self: *@This()) ?Token {
+    fn next_tok(self: *Parser) ?Token {
         const tok = self.peek_tok();
-        if (tok) |t| self.last_span = t.span;
+        if (tok) |t| {
+            self.last_token = t;
+            self.last_span = t.span;
+        }
         self.cursor += 1;
         return tok;
     }
@@ -146,7 +150,7 @@ pub const Parser = struct {
             error.Diagnostic => {
                 try self.diagnostics.emit_error(
                     start.span,
-                    "This `if-else` statement is an expression, so it must have two branches with the same type",
+                    "This `if-else` is being used as an expression, so it must have an else branch.",
                     .{},
                 );
                 return err;
@@ -331,6 +335,40 @@ pub const Parser = struct {
         return lhs;
     }
 
+    fn parse_block_expr(self: *@This()) !ast.BlockExpr {
+        _ = try self.expect_tok(.lcurly);
+        var stmts = std.ArrayList(*ast.Stmt).empty;
+        var tail: ?*ast.Expr = null;
+
+        while (!self.peek_tok_is(.rcurly)) {
+            const stmt = try self.parse_stmt();
+            if (self.peek_tok_is(.rcurly)) {
+                if (stmt.as_expr()) |expr| {
+                    tail = expr;
+                } else {
+                    try stmts.append(self.allocator, stmt);
+                    if (self.last_token) |tok| {
+                        if (tok.kind != .semicolon and tok.kind != .rcurly)
+                            _ = try self.expect_tok(.semicolon);
+                    }
+                }
+            } else {
+                try stmts.append(self.allocator, stmt);
+                if (self.last_token) |tok| {
+                    if (tok.kind != .semicolon and tok.kind != .rcurly)
+                        _ = try self.expect_tok(.semicolon);
+                }
+            }
+        }
+
+        _ = try self.expect_tok(.rcurly);
+
+        return .{
+            .stmts = stmts.items,
+            .tail = tail,
+        };
+    }
+
     //
     // Statement parsers
     //
@@ -363,17 +401,27 @@ pub const Parser = struct {
         const cond = try self.parse_expr();
         _ = try self.expect_tok(.rparen);
 
-        const is_braced_then = self.peek_tok_is(.lcurly);
         const then = try self.parse_expr();
-        if (!is_braced_then) _ = try self.expect_tok(.semicolon);
+
+        // This checks if the last token munched after parsing an expression
+        // was an rcurly or a semi. If it's neither, then we should expect a
+        // semi.
+        if (self.last_token) |t| {
+            if (t.kind != .semicolon and t.kind != .rcurly)
+                _ = try self.expect_tok(.semicolon);
+        }
 
         var else_: ?*ast.Expr = null;
 
+        // If we see an else, parse the full else block the same way we did the
+        // then block
         if (self.peek_tok_is(.else_)) {
             _ = try self.expect_tok(.else_);
-            const is_braced_else = self.peek_tok_is(.lcurly);
             else_ = try self.parse_expr();
-            if (!is_braced_else) _ = try self.expect_tok(.semicolon);
+            if (self.last_token) |t| {
+                if (t.kind != .semicolon and t.kind != .rcurly)
+                    _ = try self.expect_tok(.semicolon);
+            }
         }
 
         return .{
@@ -410,61 +458,10 @@ pub const Parser = struct {
         };
     }
 
-    fn foo() void {}
-
-    fn parse_block_expr(self: *@This()) !ast.BlockExpr {
-        _ = try self.expect_tok(.lcurly);
-        var stmts = std.ArrayList(*ast.Stmt).empty;
-
-        // early return if empty block
-        if (self.peek_tok_is(.rcurly)) {
-            _ = try self.expect_tok(.rcurly);
-
-            return .{
-                .stmts = stmts.items,
-                .tail = null,
-            };
-        }
-
-        const tail = while (true) {
-            // Try and parse a statement. It can be an expression too in which
-            // case stmt.kind.expr will be active.
-            const stmt = try self.parse_stmt();
-
-            if (self.peek_tok_is(.rcurly)) {
-                // This branch means stmt is a tail stmt.
-                if (stmt.as_expr()) |expr| {
-                    // If the stmt is an expression, set the block's tail
-                    break expr;
-                } else {
-                    // Otherwise just append it to the block's stmts; the block
-                    // has no tail expr
-                    try stmts.append(self.allocator, stmt);
-                    break null;
-                }
-            } else {
-                // If we parse a statement and the next token is NOT an rcurly,
-                // it must be a semicolon.
-                _ = try self.expect_tok(.semicolon);
-                try stmts.append(self.allocator, stmt);
-
-                // In the case that this was the last statement in the block, check for rcurly
-                if (self.peek_tok_is(.rcurly)) {
-                    break null;
-                }
-            }
-        };
-        _ = try self.expect_tok(.rcurly);
-
-        return .{
-            .stmts = stmts.items,
-            .tail = tail,
-        };
-    }
-
     fn parse_return_stmt(self: *Parser) !ast.ReturnStmt {
         _ = try self.expect_tok(.return_);
         const value = try self.parse_expr();
+        _ = try self.expect_tok(.semicolon);
         return .{ .value = value };
     }
 
