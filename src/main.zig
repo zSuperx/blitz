@@ -48,7 +48,10 @@ pub fn main(init: std.process.Init) !void {
     };
 
     try the_lexer.diagnostics.print_all();
-    if (the_lexer.diagnostics.errors > 0) die("Could not compile program", .{});
+    if (the_lexer.diagnostics.errors > 0) die(
+        "Could not compile program due to {d} errors",
+        .{the_lexer.diagnostics.errors},
+    );
 
     // Uncomment this to print all tokens
     // for (tokens) |tok| {
@@ -63,7 +66,10 @@ pub fn main(init: std.process.Init) !void {
     };
 
     try the_parser.diagnostics.print_all();
-    if (the_parser.diagnostics.errors > 0) die("Could not compile program", .{});
+    if (the_parser.diagnostics.errors > 0) die(
+        "Could not compile program due to {d} errors",
+        .{the_parser.diagnostics.errors},
+    );
 
     var the_sema = try Sema.init(alloc);
     the_sema.sema_program(program, &source) catch |err| switch (err) {
@@ -72,10 +78,14 @@ pub fn main(init: std.process.Init) !void {
     };
 
     try the_sema.diagnostics.print_all();
-    if (the_sema.diagnostics.errors > 0) die("Could not compile program", .{});
+    if (the_sema.diagnostics.errors > 0) die(
+        "Could not compile program due to {d} errors",
+        .{the_sema.diagnostics.errors},
+    );
 
     var codegen = try backends.llvm.Codegen.init(alloc, the_sema.symbol_table, cfg.ifile);
     const llvm_module_ir = try codegen.gen_program(program);
+    // const llvm_module_ir = "TODO";
 
     switch (cfg.ofile) {
         .stdout => {

@@ -111,13 +111,13 @@ pub const Sema = struct {
             .number => {},
             .variable => try self.sema_variable_expr(expr),
             .block => try self.sema_block_expr(expr),
-            .assign => try self.sema_assign_expr(expr),
             .binary => try self.sema_binary_expr(expr),
             .unary => try self.sema_unary_expr(expr),
             .call => try self.sema_call_expr(expr),
             .ifelse => try self.sema_if_else_expr(expr),
             .logic => try self.sema_logic_expr(expr),
             .cmp => try self.sema_cmp_expr(expr),
+            .return_ => try self.sema_return_expr(expr),
         }
     }
 
@@ -129,7 +129,18 @@ pub const Sema = struct {
 
         // TODO: type check to make sure both branches are same type
         try self.sema_expr(if_else.then);
-        try self.sema_expr(if_else.else_);
+
+        // If STATEMENTS can omit their else branch
+        if (if_else.else_) |else_| {
+            try self.sema_expr(else_);
+        } else if (!if_else.is_stmt) {
+            // If EXPRESSIONS cannot
+            try self.diagnostics.emit_error(
+                expr.span,
+                "This `if` is being used as an expression, so it must have an else branch",
+                .{},
+            );
+        }
     }
 
     fn sema_block_expr(self: *Sema, expr: *ast.Expr) !void {
@@ -144,36 +155,6 @@ pub const Sema = struct {
         }
 
         self.pop_scope();
-    }
-
-    fn sema_assign_expr(self: *Sema, expr: *ast.Expr) !void {
-        const assign = &expr.kind.assign;
-
-        try self.sema_expr(assign.left);
-        try self.sema_expr(assign.right);
-
-        if (std.meta.activeTag(assign.right.kind) == .assign) {
-            try self.diagnostics.emit_warning(
-                assign.right.span,
-                "Assignment expressions evaluate to 0, so this may not be what you intended",
-                .{},
-            );
-        }
-
-        if (!assign.left.is_lvalue()) {
-            try self.diagnostics.emit_error(assign.left.span, "Cannot assign to this type of expression", .{});
-        }
-
-        if (assign.left.as_variable()) |symbol| {
-            const info = self.symbol_table.getEntry(symbol).?.value_ptr;
-            if (!info.initialized) {
-                // if variable has not been initialized yet then mark it as init and move on
-                info.initialized = true;
-            } else {
-                // happy path: mark mutable variable as mutated
-                info.mutated = true;
-            }
-        }
     }
 
     fn sema_logic_expr(self: *Sema, expr: *ast.Expr) !void {
@@ -223,22 +204,39 @@ pub const Sema = struct {
     fn sema_stmt(self: *Sema, stmt: *ast.Stmt) SemaError!void {
         switch (stmt.kind) {
             .if_ => try self.sema_if_stmt(stmt),
+            .assign => try self.sema_assign_stmt(stmt),
             .decl => try self.sema_decl_stmt(stmt),
             .expr => try self.sema_expr_stmt(stmt),
-            .return_ => try self.sema_return_stmt(stmt),
+        }
+    }
+
+    fn sema_assign_stmt(self: *Sema, stmt: *ast.Stmt) !void {
+        const assign = &stmt.kind.assign;
+
+        try self.sema_expr(assign.left);
+        try self.sema_expr(assign.right);
+
+        if (!assign.left.is_lvalue()) {
+            try self.diagnostics.emit_error(assign.left.span, "Cannot assign to this type of expression", .{});
+        }
+
+        if (assign.left.as_variable()) |symbol| {
+            const info = self.symbol_table.getEntry(symbol).?.value_ptr;
+            if (!info.initialized) {
+                // if variable has not been initialized yet then mark it as init and move on
+                info.initialized = true;
+            } else {
+                // happy path: mark mutable variable as mutated
+                info.mutated = true;
+            }
         }
     }
 
     fn sema_if_stmt(self: *Sema, stmt: *ast.Stmt) !void {
         const if_ = &stmt.kind.if_;
-
-        // TODO: type check cond to make sure its a boolean
-        try self.sema_expr(if_.cond);
-
-        try self.sema_expr(if_.then);
-        if (if_.else_) |else_| {
-            try self.sema_expr(else_);
-        }
+        _ = if_;
+        _ = self;
+        // try self.sema_if_else_expr(if_, true);
     }
 
     fn sema_decl_stmt(self: *Sema, stmt: *ast.Stmt) !void {
@@ -247,14 +245,6 @@ pub const Sema = struct {
         if (decl.init) |init_expr| {
             try self.sema_expr(init_expr);
             initialized = true;
-
-            if (std.meta.activeTag(init_expr.kind) == .assign) {
-                try self.diagnostics.emit_warning(
-                    init_expr.span,
-                    "Assignment expressions evaluate to 0, so this may not be what you intended",
-                    .{},
-                );
-            }
         }
 
         const symbol = self.add_binding(.{
@@ -274,11 +264,14 @@ pub const Sema = struct {
 
     fn sema_expr_stmt(self: *Sema, stmt: *ast.Stmt) !void {
         const expr = stmt.kind.expr;
-        try self.sema_expr(expr.expr);
+        if (expr.as_if_else()) |ifelse| {
+            ifelse.is_stmt = true;
+        }
+        try self.sema_expr(expr);
     }
 
-    fn sema_return_stmt(self: *Sema, stmt: *ast.Stmt) !void {
-        const return_ = stmt.kind.return_;
+    fn sema_return_expr(self: *Sema, expr: *ast.Expr) !void {
+        const return_ = expr.kind.return_;
         try self.sema_expr(return_.value);
     }
 
@@ -316,8 +309,9 @@ pub const Sema = struct {
         const block = &function.body.kind.block;
         if (block.tail == null and block.stmts.len > 0) {
             const last = block.stmts[block.stmts.len - 1];
-            if (last.kind == .return_) {
-                try self.diagnostics.emit_warning(last.span, "Unncessary `return` at tail of function", .{});
+            if (last.as_expr()) |expr| {
+                if (expr.kind == .return_)
+                    try self.diagnostics.emit_warning(last.span, "Unncessary `return` at tail of function", .{});
             }
         }
 
@@ -352,14 +346,14 @@ pub const Sema = struct {
             if (info.mutable and !info.mutated) {
                 try self.diagnostics.emit_warning(
                     info.decl_span,
-                    "Variable `{s}` does not need to be mutable. Consider changing it to `const`.",
+                    "Variable `{s}` does not need to be mutable. Consider changing it to be `const`.",
                     .{info.name.lookup()},
                 );
             }
             if (!info.mutable and info.mutated) {
                 try self.diagnostics.emit_error(
                     info.decl_span,
-                    "Cannot assign to const variable `{s}`. Consider changing it to `mut`.",
+                    "Cannot assign to const variable `{s}`. Consider changing it to be `mut`.",
                     .{info.name.lookup()},
                 );
             }

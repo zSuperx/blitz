@@ -8,39 +8,46 @@ pub const TokenKind = union(enum) {
     ident,                              // raw contains payload
 
     // Keywords
-    fn_,                                // fn
-    return_,                            // return
-    const_,                             // const
-    mut,                                // mut
-    if_,                                // if
-    else_,                              // else
-    while_,                             // while
+    fn_,
+    return_,
+    const_,
+    mut,
+    if_,
+    else_,
+    while_,
 
     // Punctuation
-    percent,                            // %
-    semicolon,                          // ;
-    colon,                              // :
-    lparen,                             // (
-    rparen,                             // )
-    lcurly,                             // {
-    rcurly,                             // }
-    comma,                              // ,
-    plus,                               // +
-    minus,                              // -
-    star,                               // *
-    fslash,                             // /
-    bang,                               // !
-    amp,                                // &
-    pipe,                               // |
-    eq,                                 // =
-    gt,                                 // >
-    lt,                                 // <
-    eq2,                                // ==
-    bangeq,                             // !=
-    gteq,                               // >=
-    lteq,                               // <=
-    amp2,                               // &&
-    pipe2,                              // ||
+    percent,
+    semicolon,
+    colon,
+    lparen,
+    rparen,
+    lcurly,
+    rcurly,
+    comma,
+    plus,
+    minus,
+    star,
+    fslash,
+    bang,
+    amp,
+    pipe,
+    eq,
+    gt,
+    lt,
+    eq2,
+    bang_eq,
+    gt_eq,
+    lt_eq,
+    amp2,
+    pipe2,
+    plus2,
+    minus2,
+    plus_eq,
+    minus_eq,
+    star_eq,
+    fslash_eq,
+    percent_eq,
 
     eof,
     // zig fmt: on
@@ -60,11 +67,19 @@ pub const keywords: [7]TokenMapping = [_]TokenMapping{
 
 pub const Punctuator = struct { name: []const u8, kind: TokenKind };
 pub const MAX_PUNCT_LEN = 2;
-pub const punctuators: [24]TokenMapping = [_]TokenMapping{
+pub const punctuators: [32]TokenMapping = [_]TokenMapping{
+    .{ .text = "+=", .kind = .plus_eq },
+    .{ .text = "-=", .kind = .minus_eq },
+    .{ .text = "*=", .kind = .star_eq },
+    .{ .text = "/=", .kind = .fslash_eq },
+    .{ .text = "/=", .kind = .fslash_eq },
+    .{ .text = "%=", .kind = .percent_eq },
+    .{ .text = "++", .kind = .plus2 },
+    .{ .text = "--", .kind = .minus2 },
     .{ .text = "==", .kind = .eq2 },
-    .{ .text = "!=", .kind = .bangeq },
-    .{ .text = ">=", .kind = .gteq },
-    .{ .text = "<=", .kind = .lteq },
+    .{ .text = "!=", .kind = .bang_eq },
+    .{ .text = ">=", .kind = .gt_eq },
+    .{ .text = "<=", .kind = .lt_eq },
     .{ .text = "&&", .kind = .amp2 },
     .{ .text = "||", .kind = .pipe2 },
     .{ .text = "%", .kind = .percent },

@@ -10,14 +10,19 @@ const Symbol = sema.Symbol;
 const BaseSymbolInfo = sema.SymbolInfo;
 
 const LLVMValueRef = llvm.types.LLVMValueRef;
+const LLVMBasicBlockRef = llvm.types.LLVMBasicBlockRef;
+const LLVMTypeRef = llvm.types.LLVMTypeRef;
+const LLVMContextRef = llvm.types.LLVMContextRef;
+const LLVMModuleRef = llvm.types.LLVMModuleRef;
+const LLVMBuilderRef = llvm.types.LLVMBuilderRef;
+
 const LLVMSymbolInfo = struct {
     base: BaseSymbolInfo,
     value: LLVMValueRef = null,
-    type_: ?*llvm.types.LLVMOpaqueType = null,
 };
 
-var llvm_i64: *llvm.types.LLVMOpaqueType = undefined;
-var llvm_zero: *llvm.types.LLVMOpaqueValue = undefined;
+var llvm_i64: LLVMTypeRef = null;
+var llvm_zero: LLVMValueRef = null;
 
 const CodegenError = error{
     OutOfMemory,
@@ -31,9 +36,9 @@ pub const Codegen = struct {
     symbol_table: std.AutoHashMap(Symbol, LLVMSymbolInfo),
 
     // LLVM stuff
-    context: *llvm.types.LLVMOpaqueContext,
-    module: *llvm.types.LLVMOpaqueModule,
-    builder: *llvm.types.LLVMOpaqueBuilder,
+    context: LLVMContextRef,
+    module: LLVMModuleRef,
+    builder: LLVMBuilderRef,
 
     current_function: Symbol = undefined,
 
@@ -88,19 +93,27 @@ pub const Codegen = struct {
     //
 
     fn gen_expr_rvalue(self: *Codegen, expr: *ast.Expr) CodegenError!LLVMValueRef {
-        switch (expr.kind) {
-            .number => return self.gen_number_expr(expr),
-            .binary => return self.gen_binary_expr(expr),
-            .unary => return self.gen_unary_expr(expr),
-            .assign => return self.gen_assign_expr(expr),
-            .call => return self.gen_call_expr(expr),
-            .variable => return self.gen_variable_expr_rvalue(expr),
-            .block => return self.gen_block_expr(expr),
-            .ifelse => return self.gen_if_else_expr(expr),
-            .logic => return self.gen_logic_expr(expr),
-            .cmp => return self.gen_cmp_expr(expr),
-        }
+        return switch (expr.kind) {
+            .number => self.gen_number_expr(expr),
+            .binary => self.gen_binary_expr(expr),
+            .unary => self.gen_unary_expr(expr),
+            .call => self.gen_call_expr(expr),
+            .variable => self.gen_variable_expr_rvalue(expr),
+            .block => self.gen_block_expr(expr),
+            .ifelse => self.gen_if_else_expr(expr),
+            .logic => self.gen_logic_expr(expr),
+            .cmp => self.gen_cmp_expr(expr),
+            .return_ => self.gen_return_expr(expr),
+        };
     }
+
+    fn gen_return_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
+        const return_ = &expr.kind.return_;
+        const value = try self.gen_expr_rvalue(return_.value);
+        _ = core.LLVMBuildRet(self.builder, value);
+        return llvm_zero;
+    }
+
 
     fn gen_if_else_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const if_else = &expr.kind.ifelse;
@@ -117,52 +130,87 @@ pub const Codegen = struct {
         const cmp_value = core.LLVMBuildIsNotNull(self.builder, cond_value, "cond");
         _ = core.LLVMBuildCondBr(self.builder, cmp_value, then_block, else_block);
 
-        var incoming_values = std.ArrayList(LLVMValueRef).empty;
-        var incoming_blocks = std.ArrayList(?@TypeOf(then_block)).empty;
+        if (if_else.is_stmt) {
 
-        // THEN
+            // THEN
 
-        core.LLVMPositionBuilderAtEnd(self.builder, then_block);
-        const then_value = try self.gen_expr_rvalue(if_else.then);
-        const new_then_block = core.LLVMGetInsertBlock(self.builder);
+            core.LLVMPositionBuilderAtEnd(self.builder, then_block);
+            _ = try self.gen_expr_rvalue(if_else.then);
+            const new_then_block = core.LLVMGetInsertBlock(self.builder);
 
-        // If the else branch is not terminated, jump to merge and add Phi edge
-        if (core.LLVMGetBasicBlockTerminator(new_then_block) == null) {
-            _ = core.LLVMBuildBr(self.builder, merge_block);
-            try incoming_values.append(self.allocator, then_value);
-            try incoming_blocks.append(self.allocator, new_then_block);
-        }
+            // If the else branch is not terminated, jump to merge
+            if (core.LLVMGetBasicBlockTerminator(new_then_block) == null) {
+                _ = core.LLVMBuildBr(self.builder, merge_block);
+            }
 
-        // ELSE
+            // ELSE
 
-        core.LLVMPositionBuilderAtEnd(self.builder, else_block);
-        const else_value = try self.gen_expr_rvalue(if_else.else_);
-        const new_else_block = core.LLVMGetInsertBlock(self.builder);
+            core.LLVMPositionBuilderAtEnd(self.builder, else_block);
+            if (if_else.else_) |else_| {
+                _ = try self.gen_expr_rvalue(else_);
+                const new_else_block = core.LLVMGetInsertBlock(self.builder);
 
-        // If the else branch is not terminated, jump to merge and add Phi edge
-        if (core.LLVMGetBasicBlockTerminator(new_else_block) == null) {
-            _ = core.LLVMBuildBr(self.builder, merge_block);
-            try incoming_values.append(self.allocator, else_value);
-            try incoming_blocks.append(self.allocator, new_else_block);
-        }
+                // If the else branch is not terminated, jump to merge and add Phi edge
+                if (core.LLVMGetBasicBlockTerminator(new_else_block) == null) {
+                    _ = core.LLVMBuildBr(self.builder, merge_block);
+                }
+            } else {
+                _ = core.LLVMBuildBr(self.builder, merge_block);
+            }
 
-        const count = incoming_blocks.items.len;
+            core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
 
-        core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
-        if (count == 0) {
-            // If both branches terminate and neither reach the merge, mark the merge as unreachable
-            _ = core.LLVMBuildUnreachable(self.builder);
             return llvm_zero;
         } else {
-            // Otherwise add whatever branches DO reach the merge as incoming edges to the phi
-            const phi = core.LLVMBuildPhi(self.builder, llvm_i64, "ifelse").?;
-            core.LLVMAddIncoming(
-                phi,
-                @ptrCast(incoming_values.items),
-                @ptrCast(incoming_blocks.items),
-                @intCast(count),
-            );
-            return phi;
+            var incoming_values = std.ArrayList(LLVMValueRef).empty;
+            var incoming_blocks = std.ArrayList(?@TypeOf(then_block)).empty;
+
+            // THEN
+
+            core.LLVMPositionBuilderAtEnd(self.builder, then_block);
+            const then_value = try self.gen_expr_rvalue(if_else.then);
+            const new_then_block = core.LLVMGetInsertBlock(self.builder);
+
+            // If the then branch is not terminated, jump to merge and add Phi edge
+            if (core.LLVMGetBasicBlockTerminator(new_then_block) == null) {
+                _ = core.LLVMBuildBr(self.builder, merge_block);
+                try incoming_values.append(self.allocator, then_value);
+                try incoming_blocks.append(self.allocator, new_then_block);
+            }
+
+            // ELSE
+
+            core.LLVMPositionBuilderAtEnd(self.builder, else_block);
+            // It's safe to unwrap else_.? here since this is the expression
+            // variant of if so an else must exist
+            const else_value = try self.gen_expr_rvalue(if_else.else_.?);
+            const new_else_block = core.LLVMGetInsertBlock(self.builder);
+
+            // If the else branch is not terminated, jump to merge and add Phi edge
+            if (core.LLVMGetBasicBlockTerminator(new_else_block) == null) {
+                _ = core.LLVMBuildBr(self.builder, merge_block);
+                try incoming_values.append(self.allocator, else_value);
+                try incoming_blocks.append(self.allocator, new_else_block);
+            }
+
+            const count = incoming_blocks.items.len;
+
+            core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
+            if (count == 0) {
+                // If both branches terminate and neither reach the merge, mark the merge as unreachable
+                _ = core.LLVMBuildUnreachable(self.builder);
+                return llvm_zero;
+            } else {
+                // Otherwise add whatever branches DO reach the merge as incoming edges to the phi
+                const phi = core.LLVMBuildPhi(self.builder, llvm_i64, "ifelse").?;
+                core.LLVMAddIncoming(
+                    phi,
+                    @ptrCast(incoming_values.items),
+                    @ptrCast(incoming_blocks.items),
+                    @intCast(count),
+                );
+                return phi;
+            }
         }
     }
 
@@ -171,9 +219,9 @@ pub const Codegen = struct {
 
         const callee_value = try self.gen_expr_lvalue(call.callee);
 
-        var arg_values = std.ArrayList(?LLVMValueRef).empty;
+        var arg_values = std.ArrayList(LLVMValueRef).empty;
 
-        var arg_types = std.ArrayList(*llvm.types.LLVMOpaqueType).empty;
+        var arg_types = std.ArrayList(LLVMTypeRef).empty;
 
         for (call.args) |arg_expr| {
             try arg_types.append(self.allocator, llvm_i64);
@@ -196,17 +244,6 @@ pub const Codegen = struct {
         } else {
             return llvm_zero;
         }
-    }
-
-    fn gen_assign_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
-        const assign = &expr.kind.assign;
-
-        const left = try self.gen_expr_lvalue(assign.left);
-        const right = try self.gen_expr_rvalue(assign.right);
-
-        _ = core.LLVMBuildStore(self.builder, right, left).?;
-
-        return llvm_zero;
     }
 
     fn gen_variable_expr_rvalue(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
@@ -285,8 +322,31 @@ pub const Codegen = struct {
         switch (stmt.kind) {
             .if_ => try self.gen_if_stmt(stmt),
             .decl => try self.gen_decl_stmt(stmt),
+            .assign => return self.gen_assign_stmt(stmt),
             .expr => try self.gen_expr_stmt(stmt),
-            .return_ => try self.gen_return_stmt(stmt),
+        }
+    }
+
+    fn gen_assign_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
+        const assign = &stmt.kind.assign;
+
+        const left_ptr = try self.gen_expr_lvalue(assign.left);
+        const right = try self.gen_expr_rvalue(assign.right);
+
+        switch (assign.op) {
+            .assign => _ = core.LLVMBuildStore(self.builder, right, left_ptr),
+            else => {
+                const old_left_val = core.LLVMBuildLoad2(self.builder, llvm_i64, left_ptr, "");
+                const new_left_val = switch (assign.op) {
+                    .assign_add => core.LLVMBuildAdd(self.builder, old_left_val, right, ""),
+                    .assign_sub => core.LLVMBuildSub(self.builder, old_left_val, right, ""),
+                    .assign_mul => core.LLVMBuildMul(self.builder, old_left_val, right, ""),
+                    .assign_div => core.LLVMBuildSDiv(self.builder, old_left_val, right, ""),
+                    .assign_mod => core.LLVMBuildSRem(self.builder, old_left_val, right, ""),
+                    .assign => unreachable,
+                };
+                _ = core.LLVMBuildStore(self.builder, new_left_val, left_ptr);
+            },
         }
     }
 
@@ -331,19 +391,12 @@ pub const Codegen = struct {
             }
         }
 
-
         core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
     }
 
-    fn gen_return_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
-        const return_ = &stmt.kind.return_;
-        const value = try self.gen_expr_rvalue(return_.value);
-        _ = core.LLVMBuildRet(self.builder, value);
-    }
-
     fn gen_expr_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
-        const expr = &stmt.kind.expr;
-        _ = try self.gen_expr_rvalue(expr.expr);
+        const expr = stmt.kind.expr;
+        _ = try self.gen_expr_rvalue(expr);
     }
 
     fn gen_decl_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
@@ -392,7 +445,7 @@ pub const Codegen = struct {
 
     pub fn gen_program(self: *Codegen, program: *ast.Program) ![:0]const u8 {
         for (program.functions) |function| {
-            var arg_types = std.ArrayList(*llvm.types.LLVMOpaqueType).empty;
+            var arg_types = std.ArrayList(LLVMTypeRef).empty;
             for (function.arguments) |_| {
                 try arg_types.append(self.allocator, llvm_i64);
             }

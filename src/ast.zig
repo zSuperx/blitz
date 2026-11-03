@@ -40,15 +40,15 @@ pub const Function = struct {
 pub const Stmt = struct {
     kind: union(enum) {
         decl: DeclStmt,
+        assign: AssignStmt,
         expr: ExprStmt,
-        if_: IfStmt,
-        return_: ReturnStmt,
+        if_: IfElseExpr,
     },
     span: diag.Span,
 
     pub fn as_expr(self: *Stmt) ?*Expr {
         switch (self.kind) {
-            .expr => |*expr| return expr.expr,
+            .expr => |expr| return expr,
             else => return null,
         }
     }
@@ -64,6 +64,12 @@ pub const Stmt = struct {
             .return_ => |stmt| try writer.print("{f}", .{stmt}),
         }
     }
+};
+
+pub const AssignStmt = struct {
+    op: AssignOp,
+    left: *Expr,
+    right: *Expr,
 };
 
 pub const DeclStmt = struct {
@@ -90,26 +96,7 @@ pub const IfStmt = struct {
     else_: ?*Expr = null,
 };
 
-pub const ReturnStmt = struct {
-    value: *Expr,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("return ({f})", .{self.value});
-    }
-};
-
-pub const ExprStmt = struct {
-    expr: *Expr,
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("{f}", .{self.expr});
-    }
-};
+pub const ExprStmt = *Expr;
 
 // ====================================================
 // Expressions
@@ -122,12 +109,19 @@ pub const Expr = struct {
         cmp: CmpExpr,
         logic: LogicExpr,
         unary: UnExpr,
-        assign: AssignExpr,
         call: CallExpr,
         block: BlockExpr,
         ifelse: IfElseExpr,
+        return_: ReturnExpr,
     },
     span: diag.Span,
+
+    pub fn as_if_else(self: *Expr) ?*IfElseExpr {
+        switch (self.kind) {
+            .ifelse => |*ifelse| return ifelse,
+            else => return null,
+        }
+    }
 
     pub fn as_block(self: *Expr) ?*BlockExpr {
         switch (self.kind) {
@@ -151,6 +145,18 @@ pub const Expr = struct {
     }
 };
 
+pub const ReturnExpr = struct {
+    value: *Expr,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("return ({f})", .{self.value});
+    }
+};
+
+
 pub const BlockExpr = struct {
     stmts: []const *Stmt,
     tail: ?*Expr,
@@ -159,7 +165,8 @@ pub const BlockExpr = struct {
 pub const IfElseExpr = struct {
     cond: *Expr,
     then: *Expr,
-    else_: *Expr,
+    else_: ?*Expr,
+    is_stmt: bool = false,
 };
 
 pub const CmpExpr = struct {
@@ -185,11 +192,6 @@ pub const UnExpr = struct {
     inner: *Expr,
 };
 
-pub const AssignExpr = struct {
-    left: *Expr,
-    right: *Expr,
-};
-
 pub const Variable = struct {
     ident: StringId,
     symbol: ?Symbol = null,
@@ -213,6 +215,15 @@ pub const CallExpr = struct {
 
 // ====================================================
 // Operators
+
+pub const AssignOp = enum {
+    assign,
+    assign_add,
+    assign_sub,
+    assign_mul,
+    assign_div,
+    assign_mod,
+};
 
 pub const LogicOp = enum {
     eq,
