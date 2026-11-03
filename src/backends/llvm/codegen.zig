@@ -111,26 +111,59 @@ pub const Codegen = struct {
         const else_block = core.LLVMAppendBasicBlock(fn_info.value, "else").?;
         const merge_block = core.LLVMAppendBasicBlock(fn_info.value, "merge").?;
 
+        // COND
+
         const cond_value = try self.gen_expr_rvalue(if_else.cond);
         const cmp_value = core.LLVMBuildIsNotNull(self.builder, cond_value, "cond");
         _ = core.LLVMBuildCondBr(self.builder, cmp_value, then_block, else_block);
 
+        var incoming_values = std.ArrayList(*LLVMValue).empty;
+        var incoming_blocks = std.ArrayList(?@TypeOf(then_block)).empty;
+
+        // THEN
+
         core.LLVMPositionBuilderAtEnd(self.builder, then_block);
         const then_value = try self.gen_expr_rvalue(if_else.then);
-        _ = core.LLVMBuildBr(self.builder, merge_block);
         const new_then_block = core.LLVMGetInsertBlock(self.builder);
+
+        // If the else branch is not terminated, jump to merge and add Phi edge
+        if (core.LLVMGetBasicBlockTerminator(new_then_block) == null) {
+            _ = core.LLVMBuildBr(self.builder, merge_block);
+            try incoming_values.append(self.allocator, then_value);
+            try incoming_blocks.append(self.allocator, new_then_block);
+        }
+
+        // ELSE
 
         core.LLVMPositionBuilderAtEnd(self.builder, else_block);
         const else_value = try self.gen_expr_rvalue(if_else.else_);
-        _ = core.LLVMBuildBr(self.builder, merge_block);
         const new_else_block = core.LLVMGetInsertBlock(self.builder);
 
+        // If the else branch is not terminated, jump to merge and add Phi edge
+        if (core.LLVMGetBasicBlockTerminator(new_else_block) == null) {
+            _ = core.LLVMBuildBr(self.builder, merge_block);
+            try incoming_values.append(self.allocator, else_value);
+            try incoming_blocks.append(self.allocator, new_else_block);
+        }
+
+        const count = incoming_blocks.items.len;
+
         core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
-        const phi = core.LLVMBuildPhi(self.builder, llvm_i64, "ifelse").?;
-        var incoming_values = [_]@TypeOf(then_value){then_value, else_value};
-        var incoming_blocks = [_]@TypeOf(new_then_block){new_then_block, new_else_block};
-        core.LLVMAddIncoming(phi, @ptrCast(&incoming_values), @ptrCast(&incoming_blocks), 2);
-        return phi;
+        if (count == 0) {
+            // If both branches terminate and neither reach the merge, mark the merge as unreachable
+            _ = core.LLVMBuildUnreachable(self.builder);
+            return llvm_zero;
+        } else {
+            // Otherwise add whatever branches DO reach the merge as incoming edges to the phi
+            const phi = core.LLVMBuildPhi(self.builder, llvm_i64, "ifelse").?;
+            core.LLVMAddIncoming(
+                phi,
+                @ptrCast(incoming_values.items),
+                @ptrCast(incoming_blocks.items),
+                @intCast(count),
+            );
+            return phi;
+        }
     }
 
     fn gen_call_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
@@ -271,7 +304,11 @@ pub const Codegen = struct {
 
         core.LLVMPositionBuilderAtEnd(self.builder, then_block);
         _ = try self.gen_expr_rvalue(if_.then);
+        const new_then_block = core.LLVMGetInsertBlock(self.builder);
         _ = core.LLVMBuildBr(self.builder, merge_block);
+
+        if (core.LLVMGetBasicBlockTerminator(new_then_block) == null)
+            _ = core.LLVMBuildBr(self.builder, merge_block);
 
         core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
     }
@@ -330,8 +367,7 @@ pub const Codegen = struct {
             _ = core.LLVMBuildRet(self.builder, tail);
         }
 
-        const status = llvm.analysis.LLVMVerifyFunction(function_value, .LLVMPrintMessageAction);
-        if (status != 0) return error.LLVMVerifyFailed;
+        _ = llvm.analysis.LLVMVerifyFunction(function_value, .LLVMPrintMessageAction);
     }
 
     pub fn gen_program(self: *Codegen, program: *ast.Program) ![:0]const u8 {

@@ -12,16 +12,23 @@ annotations, as every type is inferred to be a `i64`.
 
 _(I will add more types + an actual type checking phase later when I get time.)_
 
-Here is some example Blitz code (there is no control flow yet haha):
-```
+Here is some example Blitz code:
+```rs
 fn add(a, b) {
-  return a + b;
+  a + b
 }
 
-fn main() {
-  let a = 34;
-  let b = 35;
-  return add(a, b);
+fn main(argc, argv) {
+    const a = 34;
+    mut b = 35;
+
+    if (argc > 1) {
+        b = add(a, b);
+        b
+    } else {
+        return 100;
+    }
+
 }
 ```
 
