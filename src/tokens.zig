@@ -35,12 +35,12 @@ pub const TokenKind = union(enum) {
     eq,                                 // =
     gt,                                 // >
     lt,                                 // <
-    eqeq,                               // ==
+    eq2,                                // ==
     bangeq,                             // !=
     gteq,                               // >=
     lteq,                               // <=
-    ampamp,                             // &&
-    pipepipe,                           // ||
+    amp2,                               // &&
+    pipe2,                              // ||
 
     eof,
     // zig fmt: on
@@ -61,12 +61,12 @@ pub const keywords: [7]TokenMapping = [_]TokenMapping{
 pub const Punctuator = struct { name: []const u8, kind: TokenKind };
 pub const MAX_PUNCT_LEN = 2;
 pub const punctuators: [24]TokenMapping = [_]TokenMapping{
-    .{ .text = "==", .kind = .eqeq },
+    .{ .text = "==", .kind = .eq2 },
     .{ .text = "!=", .kind = .bangeq },
     .{ .text = ">=", .kind = .gteq },
     .{ .text = "<=", .kind = .lteq },
-    .{ .text = "&&", .kind = .ampamp },
-    .{ .text = "||", .kind = .pipepipe },
+    .{ .text = "&&", .kind = .amp2 },
+    .{ .text = "||", .kind = .pipe2 },
     .{ .text = "%", .kind = .percent },
     .{ .text = ";", .kind = .semicolon },
     .{ .text = ":", .kind = .colon },

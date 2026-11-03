@@ -24,7 +24,7 @@ pub const Parser = struct {
     diagnostics: diag.DiagnosticList = undefined,
     cursor: usize = 0,
     allocator: std.mem.Allocator,
-    last_token: ?Token = null,
+    last_span: diag.Span = .zeroed,
 
     pub fn init(allocator: std.mem.Allocator, string_pool: *sp.StringPool) @This() {
         return .{
@@ -37,17 +37,21 @@ pub const Parser = struct {
     // Helper functions
     //
 
+    // Emits an unexpected EOF diagnostic error
     fn report_unexpected_eof(self: *Parser) ParseError {
-        try self.diagnostics.emit_error(self.tokens[self.cursor - 1].span, "Unexpected end of file", .{});
+        try self.diagnostics.emit_error(self.last_span, "Unexpected end of file", .{});
         return ParseError.Diagnostic;
     }
 
+    // TODO: much of these operator powers are inherited from my old compiler,
+    // and I forgot how I derived them. perhaps revisit and formalize this at
+    // some point?
     fn get_op_power(op: Token) ?struct { prefix: usize = 0, left: usize, right: usize } {
         return switch (op.kind) {
             // zig fmt: off
             .eq               => .{ .left = 1, .right = 0 },
-            .ampamp, .pipepipe=> .{ .left = 3, .right = 2 },
-            .eqeq, .bangeq    => .{ .left = 4, .right = 5 },
+            .amp2, .pipe2     => .{ .left = 3, .right = 2 },
+            .eq2, .bangeq     => .{ .left = 4, .right = 5 },
             .lt, .lteq,
             .gt, .gteq        => .{ .left = 6, .right = 7 },
             .plus, .minus     => .{ .left = 8, .right = 9 },
@@ -87,7 +91,7 @@ pub const Parser = struct {
     /// Returns next token and consumes it.
     fn next_tok(self: *@This()) ?Token {
         const tok = self.peek_tok();
-        self.last_token = tok;
+        if (tok) |t| self.last_span = t.span;
         self.cursor += 1;
         return tok;
     }
@@ -129,6 +133,35 @@ pub const Parser = struct {
         return try self.parse_expr_1(0);
     }
 
+    fn parse_if_else_expr(self: *Parser) !ast.IfElseExpr {
+        const start = try self.expect_tok(.if_);
+
+        _ = try self.expect_tok(.lparen);
+        const cond = try self.parse_expr();
+        _ = try self.expect_tok(.rparen);
+
+        const then = try self.parse_expr();
+
+        _ = self.expect_tok(.else_) catch |err| switch (err) {
+            error.Diagnostic => {
+                try self.diagnostics.emit_error(
+                    start.span,
+                    "This `if-else` statement is an expression, so it must have two branches with the same type",
+                    .{},
+                );
+                return err;
+            },
+            else => return err,
+        };
+        const else_ = try self.parse_expr();
+
+        return .{
+            .cond = cond,
+            .then = then,
+            .else_ = else_,
+        };
+    }
+
     fn parse_prefix_expr(self: *@This()) !*ast.Expr {
         const tok = self.peek_tok() orelse return self.report_unexpected_eof();
         const p = try self.allocator.create(ast.Expr);
@@ -140,22 +173,8 @@ pub const Parser = struct {
                 };
             },
             .if_ => {
-                _ = self.next_tok();
-
-                _ = try self.expect_tok(.lparen);
-                const cond = try self.parse_expr();
-                _ = try self.expect_tok(.rparen);
-
-                const then = try self.parse_expr();
-                _ = try self.expect_tok(.else_);
-                const else_ = try self.parse_expr();
-
                 p.kind = .{
-                    .ifelse = .{
-                        .cond = cond,
-                        .then = then,
-                        .else_ = else_,
-                    },
+                    .ifelse = try self.parse_if_else_expr(),
                 };
             },
             .ident => {
@@ -205,7 +224,7 @@ pub const Parser = struct {
                 return error.Diagnostic;
             },
         }
-        p.span = tok.span.merge(self.last_token.?.span);
+        p.span = tok.span.merge(self.last_span);
         return p;
     }
 
@@ -230,9 +249,9 @@ pub const Parser = struct {
                     },
                 };
             },
-            .eqeq, .bangeq => {
+            .eq2, .bangeq => {
                 const logicop: ast.LogicOp = switch (op.kind) {
-                    .eqeq => .eq,
+                    .eq2 => .eq,
                     .bangeq => .ne,
                     else => unreachable,
                 };
@@ -292,7 +311,7 @@ pub const Parser = struct {
                 return error.Diagnostic;
             },
         }
-        p.span = lhs.span.merge(self.last_token.?.span);
+        p.span = lhs.span.merge(self.last_span);
         return p;
     }
 
@@ -319,7 +338,7 @@ pub const Parser = struct {
     fn parse_stmt(self: *@This()) ParseError!*ast.Stmt {
         const peek = self.peek_tok() orelse return self.report_unexpected_eof();
         const p = try self.allocator.create(ast.Stmt);
-        switch (std.meta.activeTag(peek.kind)) {
+        switch (peek.kind) {
             .const_, .mut => {
                 p.kind = .{ .decl = try self.parse_decl_stmt() };
             },
@@ -327,65 +346,41 @@ pub const Parser = struct {
                 p.kind = .{ .return_ = try self.parse_return_stmt() };
             },
             .if_ => {
-                self.allocator.destroy(p);
-                return try self.parse_if_stmt();
+                p.kind = .{ .if_ = try self.parse_if_stmt() };
             },
             else => {
                 p.kind = .{ .expr = try self.parse_expr_stmt() };
             },
         }
-        p.span = peek.span.merge(self.last_token.?.span);
+        p.span = peek.span.merge(self.last_span);
         return p;
     }
 
-    fn parse_if_stmt(self: *Parser) !*ast.Stmt {
-        const if_ = try self.expect_tok(.if_);
+    fn parse_if_stmt(self: *Parser) !ast.IfStmt {
+        _ = try self.expect_tok(.if_);
 
         _ = try self.expect_tok(.lparen);
         const cond = try self.parse_expr();
         _ = try self.expect_tok(.rparen);
 
+        const is_braced_then = self.peek_tok_is(.lcurly);
         const then = try self.parse_expr();
+        if (!is_braced_then) _ = try self.expect_tok(.semicolon);
 
-        const p = try self.allocator.create(ast.Stmt);
+        var else_: ?*ast.Expr = null;
 
         if (self.peek_tok_is(.else_)) {
             _ = try self.expect_tok(.else_);
-            const else_ = try self.parse_expr();
-
-            const expr = try self.allocator.create(ast.Expr);
-            expr.* = .{
-                .kind = .{
-                    .ifelse = .{
-                        .cond = cond,
-                        .then = then,
-                        .else_ = else_,
-                    },
-                },
-                .span = if_.span.merge(else_.span),
-            };
-
-            p.* = .{
-                .kind = .{
-                    .expr = .{
-                        .expr = expr,
-                    },
-                },
-                .span = expr.span,
-            };
-        } else {
-            p.* = .{
-                .kind = .{
-                    .if_ = .{
-                        .cond = cond,
-                        .then = then,
-                    },
-                },
-                .span = if_.span.merge(then.span),
-            };
+            const is_braced_else = self.peek_tok_is(.lcurly);
+            else_ = try self.parse_expr();
+            if (!is_braced_else) _ = try self.expect_tok(.semicolon);
         }
 
-        return p;
+        return .{
+            .cond = cond,
+            .then = then,
+            .else_ = else_,
+        };
     }
 
     fn parse_expr_stmt(self: *@This()) !ast.ExprStmt {
@@ -414,6 +409,8 @@ pub const Parser = struct {
             .mutable = std.meta.activeTag(declarator.kind) == .mut,
         };
     }
+
+    fn foo() void {}
 
     fn parse_block_expr(self: *@This()) !ast.BlockExpr {
         _ = try self.expect_tok(.lcurly);

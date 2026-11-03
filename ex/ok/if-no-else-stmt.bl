@@ -1,3 +1,0 @@
-fn main(argc) {
-    if (argc) argc = 3;
-}

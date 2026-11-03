@@ -18,12 +18,39 @@ pub const Source = struct {
                 try newlines.put(newlines.count(), offset);
             }
         }
+        try newlines.put(newlines.count(), bytes.len);
 
         return .{
             .path = path,
             .bytes = bytes,
             .newlines = newlines,
         };
+    }
+
+
+    pub fn print(source: *const Source, diag: *const Diagnostic) void {
+        switch (diag.level) {
+            .err => std.log.err("\n{s}:{d}:{d}: {s}\n", .{ source.path, diag.span.row + 1, diag.span.col + 1, diag.msg }),
+            .warn => std.log.warn("\n{s}:{d}:{d}: {s}\n", .{ source.path, diag.span.row + 1, diag.span.col + 1, diag.msg }),
+        }
+
+        // Calculate beginning & end of span's line
+        var bol = source.newlines.get(diag.span.row) orelse return;
+        if (source.bytes[bol] == '\n') bol += 1;
+        const eol = source.newlines.get(diag.span.row + 1) orelse return;
+
+        ezio.print("\t{s}\n\t", .{source.bytes[bol..eol]});
+        for (0..diag.span.col) |_| {
+            ezio.print(" ", .{});
+        }
+        ezio.print("^", .{});
+
+        const lo = diag.span.lo;
+        const hi = @max(diag.span.lo, diag.span.hi -| 1);
+        for (lo..hi) |_| {
+            ezio.print("~", .{});
+        }
+        ezio.println("\n", .{});
     }
 };
 
@@ -32,6 +59,8 @@ pub const Span = struct {
     hi: usize,
     row: usize,
     col: usize,
+
+    pub const zeroed: Span = .{ .col = 0, .row = 0, .lo = 0, .hi = 0 };
 
     pub fn merge(self: Span, other: Span) Span {
         return .{
@@ -50,28 +79,6 @@ pub const Diagnostic = struct {
     },
     msg: []const u8,
     span: Span,
-
-    pub fn print(diag: *const Diagnostic, source: *const Source) void {
-        switch (diag.level) {
-            .err => std.log.err("\n{s}:{d}:{d}: {s}\n", .{ source.path, diag.span.row + 1, diag.span.col + 1, diag.msg }),
-            .warn => std.log.warn("\n{s}:{d}:{d}: {s}\n", .{ source.path, diag.span.row + 1, diag.span.col + 1, diag.msg }),
-        }
-        var bol = source.newlines.get(diag.span.row).?;
-        if (source.bytes[bol] == '\n') bol += 1;
-        const eol = source.newlines.get(diag.span.row + 1).?;
-        ezio.print("\t{s}\n\t", .{source.bytes[bol..eol]});
-        for (0..diag.span.col) |_| {
-            ezio.print(" ", .{});
-        }
-        ezio.print("^", .{});
-
-        const lo = diag.span.lo;
-        const hi = @max(diag.span.lo, diag.span.hi -| 1);
-        for (lo..hi) |_| {
-            ezio.print("~", .{});
-        }
-        ezio.println("\n", .{});
-    }
 };
 
 pub const DiagnosticList = struct {
@@ -110,7 +117,7 @@ pub const DiagnosticList = struct {
 
     pub fn print_all(self: *const DiagnosticList) !void {
         for (self.list.items) |diag| {
-            diag.print(self.source);
+            self.source.print(&diag);
         }
     }
 };

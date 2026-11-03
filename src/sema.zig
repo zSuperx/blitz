@@ -236,6 +236,9 @@ pub const Sema = struct {
         try self.sema_expr(if_.cond);
 
         try self.sema_expr(if_.then);
+        if (if_.else_) |else_| {
+            try self.sema_expr(else_);
+        }
     }
 
     fn sema_decl_stmt(self: *Sema, stmt: *ast.Stmt) !void {

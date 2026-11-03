@@ -87,6 +87,7 @@ pub const DeclStmt = struct {
 pub const IfStmt = struct {
     cond: *Expr,
     then: *Expr,
+    else_: ?*Expr = null,
 };
 
 pub const ReturnStmt = struct {
@@ -127,6 +128,13 @@ pub const Expr = struct {
         ifelse: IfElseExpr,
     },
     span: diag.Span,
+
+    pub fn as_block(self: *Expr) ?*BlockExpr {
+        switch (self.kind) {
+            .block => |*block| return block,
+            else => return null,
+        }
+    }
 
     pub fn as_variable(self: *Expr) ?Symbol {
         switch (self.kind) {

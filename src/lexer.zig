@@ -115,7 +115,6 @@ pub const Lexer = struct {
             return null;
         };
 
-
         for (0..token_length) |_| {
             _ = self.next_byte();
         }
@@ -162,12 +161,51 @@ pub const Lexer = struct {
         }
     }
 
+    // Reads a comment, whether it be line or block. Returns whether a comment was read.
+    fn read_comment(self: *Lexer) !bool {
+        const lookahead = self.peek_n_bytes(2);
+
+        if (std.mem.eql(u8, lookahead, "//")) {
+            _ = self.next_byte();
+            _ = self.next_byte();
+
+            while (self.next_byte()) |byte| {
+                if (byte == '\n') break;
+            }
+            return true;
+        } else if (std.mem.eql(u8, lookahead, "/*")) {
+            _ = self.next_byte();
+            _ = self.next_byte();
+
+            while (true) {
+                const byte = self.next_byte() orelse {
+                    try self.diagnostics.emit_error(
+                        self.current_span(),
+                        "Unterminated block comment. Terminate it with `*/`",
+                        .{},
+                    );
+                    return error.Diagnostic;
+                };
+
+                if (byte == '*') {
+                    if (self.peek_byte() == '/') {
+                        _ = self.next_byte();
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
     //
     // Driver code
     //
 
     fn next_token(self: *@This()) !Token {
-        self.read_whitespace();
+        while (true) {
+            self.read_whitespace();
+            if (!try self.read_comment()) break;
+        }
 
         if (try self.read_number()) |tok| return tok;
         if (try self.read_word()) |tok| return tok;

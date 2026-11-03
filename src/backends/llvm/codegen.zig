@@ -296,19 +296,41 @@ pub const Codegen = struct {
         const fn_info = self.symbol_table.getEntry(self.current_function).?.value_ptr;
 
         const then_block = core.LLVMAppendBasicBlock(fn_info.value, "then").?;
+        const else_block = core.LLVMAppendBasicBlock(fn_info.value, "else").?;
         const merge_block = core.LLVMAppendBasicBlock(fn_info.value, "merge").?;
+
+        // COND
 
         const cond_value = try self.gen_expr_rvalue(if_.cond);
         const cmp_value = core.LLVMBuildIsNotNull(self.builder, cond_value, "cond");
-        _ = core.LLVMBuildCondBr(self.builder, cmp_value, then_block, merge_block);
+
+        const condbr_target = if (if_.else_) |_| else_block else merge_block;
+        _ = core.LLVMBuildCondBr(self.builder, cmp_value, then_block, condbr_target);
+
+        // THEN
 
         core.LLVMPositionBuilderAtEnd(self.builder, then_block);
         _ = try self.gen_expr_rvalue(if_.then);
         const new_then_block = core.LLVMGetInsertBlock(self.builder);
-        _ = core.LLVMBuildBr(self.builder, merge_block);
 
-        if (core.LLVMGetBasicBlockTerminator(new_then_block) == null)
+        // If the else branch is not terminated, jump to merge
+        if (core.LLVMGetBasicBlockTerminator(new_then_block) == null) {
             _ = core.LLVMBuildBr(self.builder, merge_block);
+        }
+
+        // ELSE
+
+        if (if_.else_) |else_| {
+            core.LLVMPositionBuilderAtEnd(self.builder, else_block);
+            _ = try self.gen_expr_rvalue(else_);
+            const new_else_block = core.LLVMGetInsertBlock(self.builder);
+
+            // If the else branch is not terminated, jump to merge and add Phi edge
+            if (core.LLVMGetBasicBlockTerminator(new_else_block) == null) {
+                _ = core.LLVMBuildBr(self.builder, merge_block);
+            }
+        }
+
 
         core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
     }

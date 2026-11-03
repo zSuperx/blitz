@@ -1,3 +1,0 @@
-fn main(argc) {
-    const x = if (argc) 5;
-}
