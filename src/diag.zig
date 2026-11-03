@@ -78,6 +78,8 @@ pub const DiagnosticList = struct {
     allocator: std.mem.Allocator,
     list: std.ArrayList(Diagnostic) = .empty,
     source: *const Source,
+    errors: usize = 0,
+    warnings: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, source: *const Source) DiagnosticList {
         return .{
@@ -88,6 +90,7 @@ pub const DiagnosticList = struct {
 
     pub fn emit_error(self: *DiagnosticList, span: Span, comptime fmt: []const u8, args: anytype) !void {
         const msg = try std.fmt.allocPrint(self.allocator, fmt, args);
+        self.errors += 1;
         try self.list.append(self.allocator, .{
             .level = .err,
             .msg = msg,
@@ -97,7 +100,8 @@ pub const DiagnosticList = struct {
 
     pub fn emit_warning(self: *DiagnosticList, span: Span, comptime fmt: []const u8, args: anytype) !void {
         const msg = try std.fmt.allocPrint(self.allocator, fmt, args);
-        try self.diagnostics.append(self.allocator, .{
+        self.warnings += 1;
+        try self.list.append(self.allocator, .{
             .level = .warn,
             .msg = msg,
             .span = span,

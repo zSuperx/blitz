@@ -8,11 +8,16 @@ pub const TokenKind = union(enum) {
     ident,                              // raw contains payload
 
     // Keywords
-    let,                                // let
     fn_,                                // fn
     return_,                            // return
+    const_,                             // const
+    mut,                                // mut
+    if_,                                // if
+    else_,                              // else
+    while_,                             // while
 
     // Punctuation
+    percent,                            // %
     semicolon,                          // ;
     colon,                              // :
     lparen,                             // (
@@ -24,47 +29,62 @@ pub const TokenKind = union(enum) {
     minus,                              // -
     star,                               // *
     fslash,                             // /
-    equals,                             // =
     bang,                               // !
     amp,                                // &
     pipe,                               // |
+    eq,                                 // =
+    gt,                                 // >
+    lt,                                 // <
+    eqeq,                               // ==
+    bangeq,                             // !=
+    gteq,                               // >=
+    lteq,                               // <=
+    ampamp,                             // &&
+    pipepipe,                           // ||
 
     eof,
     // zig fmt: on
 
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        const s = switch (self) {
-            .string_literal => "string literal",
-            .number => "numeric literal",
-            .ident => "identifier",
+};
 
-            .let => "let",
-            .fn_ => "fn",
-            .return_ => "return",
+pub const TokenMapping = struct { text: []const u8, kind: TokenKind };
+pub const keywords: [7]TokenMapping = [_]TokenMapping{
+    .{ .text = "const", .kind = .const_ },
+    .{ .text = "mut", .kind = .mut },
+    .{ .text = "fn", .kind = .fn_ },
+    .{ .text = "if", .kind = .if_ },
+    .{ .text = "else", .kind = .else_ },
+    .{ .text = "return", .kind = .return_ },
+    .{ .text = "while", .kind = .while_ },
+};
 
-            .semicolon => ";",
-            .colon => ":",
-            .lparen => "(",
-            .rparen => ")",
-            .lcurly => "{",
-            .rcurly => "}",
-            .comma => ",",
-            .plus => "+",
-            .minus => "-",
-            .star => "*",
-            .fslash => "/",
-            .equals => "=",
-            .bang => "!",
-            .amp => "&",
-            .pipe => "|",
-            .eof => "EOF",
-        };
-
-        try writer.writeAll(s);
-    }
+pub const Punctuator = struct { name: []const u8, kind: TokenKind };
+pub const MAX_PUNCT_LEN = 2;
+pub const punctuators: [24]TokenMapping = [_]TokenMapping{
+    .{ .text = "==", .kind = .eqeq },
+    .{ .text = "!=", .kind = .bangeq },
+    .{ .text = ">=", .kind = .gteq },
+    .{ .text = "<=", .kind = .lteq },
+    .{ .text = "&&", .kind = .ampamp },
+    .{ .text = "||", .kind = .pipepipe },
+    .{ .text = "%", .kind = .percent },
+    .{ .text = ";", .kind = .semicolon },
+    .{ .text = ":", .kind = .colon },
+    .{ .text = "(", .kind = .lparen },
+    .{ .text = ")", .kind = .rparen },
+    .{ .text = "{", .kind = .lcurly },
+    .{ .text = "}", .kind = .rcurly },
+    .{ .text = ",", .kind = .comma },
+    .{ .text = "+", .kind = .plus },
+    .{ .text = "-", .kind = .minus },
+    .{ .text = "*", .kind = .star },
+    .{ .text = "/", .kind = .fslash },
+    .{ .text = "!", .kind = .bang },
+    .{ .text = "&", .kind = .amp },
+    .{ .text = "|", .kind = .pipe },
+    .{ .text = "=", .kind = .eq },
+    .{ .text = ">", .kind = .gt },
+    .{ .text = "<", .kind = .lt },
 };
 
 pub const Token = struct {

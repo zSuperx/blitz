@@ -22,7 +22,7 @@ pub const Program = struct {
 pub const Function = struct {
     name: Variable,
     arguments: []Variable,
-    body: *Stmt,
+    body: *Expr,
     span: diag.Span,
 
     pub fn format(self: Function, writer: *std.Io.Writer) !void {
@@ -39,19 +39,26 @@ pub const Function = struct {
 
 pub const Stmt = struct {
     kind: union(enum) {
-        let: LetStmt,
-        block: BlockStmt,
+        decl: DeclStmt,
         expr: ExprStmt,
+        if_: IfStmt,
         return_: ReturnStmt,
     },
     span: diag.Span,
+
+    pub fn as_expr(self: *Stmt) ?*Expr {
+        switch (self.kind) {
+            .expr => |*expr| return expr.expr,
+            else => return null,
+        }
+    }
 
     pub fn format(
         self: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
         switch (self.kind) {
-            .let => |stmt| try writer.print("{f}", .{stmt}),
+            .decl => |stmt| try writer.print("{f}", .{stmt}),
             .block => |stmt| try writer.print("{f}", .{stmt}),
             .expr => |stmt| try writer.print("{f}", .{stmt}),
             .return_ => |stmt| try writer.print("{f}", .{stmt}),
@@ -59,9 +66,10 @@ pub const Stmt = struct {
     }
 };
 
-pub const LetStmt = struct {
+pub const DeclStmt = struct {
     variable: Variable,
     init: ?*Expr,
+    mutable: bool,
 
     pub fn format(
         self: @This(),
@@ -76,19 +84,9 @@ pub const LetStmt = struct {
     }
 };
 
-pub const BlockStmt = struct {
-    stmts: []const *Stmt,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("{{\n", .{});
-        for (self.stmts) |stmt| {
-            try writer.print("{f}\n", .{stmt});
-        }
-        try writer.print("}}", .{});
-    }
+pub const IfStmt = struct {
+    cond: *Expr,
+    then: *Expr,
 };
 
 pub const ReturnStmt = struct {
@@ -120,22 +118,20 @@ pub const Expr = struct {
         number: u128,
         variable: Variable,
         binary: BinExpr,
+        cmp: CmpExpr,
+        logic: LogicExpr,
         unary: UnExpr,
         assign: AssignExpr,
         call: CallExpr,
+        block: BlockExpr,
+        ifelse: IfElseExpr,
     },
     span: diag.Span,
 
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
+    pub fn as_variable(self: *Expr) ?Symbol {
         switch (self.kind) {
-            .number => |expr| try writer.print("{d}", .{expr}),
-            .unary => |expr| try writer.print("{f}", .{expr}),
-            .binary => |expr| try writer.print("{f}", .{expr}),
-            .variable => |expr| try writer.print("{f}", .{expr}),
-            .call => |expr| try writer.print("{f}", .{expr}),
+            .variable => |variable| return variable.symbol,
+            else => return null,
         }
     }
 
@@ -147,41 +143,43 @@ pub const Expr = struct {
     }
 };
 
+pub const BlockExpr = struct {
+    stmts: []const *Stmt,
+    tail: ?*Expr,
+};
+
+pub const IfElseExpr = struct {
+    cond: *Expr,
+    then: *Expr,
+    else_: *Expr,
+};
+
+pub const CmpExpr = struct {
+    op: CmpOp,
+    left: *Expr,
+    right: *Expr,
+};
+
+pub const LogicExpr = struct {
+    op: LogicOp,
+    left: *Expr,
+    right: *Expr,
+};
+
 pub const BinExpr = struct {
     op: BinOp,
     left: *Expr,
     right: *Expr,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("({f}, {f}, {f})", .{ self.op, self.left, self.right });
-    }
 };
 
 pub const UnExpr = struct {
     op: UnOp,
     inner: *Expr,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("({f}, {f})", .{ self.op, self.inner });
-    }
 };
 
 pub const AssignExpr = struct {
     left: *Expr,
     right: *Expr,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("(= {f}, {f})", .{ self.left, self.right });
-    }
 };
 
 pub const Variable = struct {
@@ -189,7 +187,7 @@ pub const Variable = struct {
     symbol: ?Symbol = null,
 
     pub fn format(
-        self: @This(),
+        self: Variable,
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
         if (self.symbol) |symbol| {
@@ -203,58 +201,32 @@ pub const Variable = struct {
 pub const CallExpr = struct {
     callee: *Expr,
     args: []*Expr,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("call {f}", .{self.callee});
-        if (self.args.len > 0) {
-            try writer.writeAll(" with (");
-            for (self.args) |arg| {
-                try writer.print("{f},", .{arg});
-            }
-            try writer.writeAll(")");
-        }
-    }
 };
 
 // ====================================================
 // Operators
+
+pub const LogicOp = enum {
+    eq,
+    ne,
+};
+
+pub const CmpOp = enum {
+    lt,
+    gt,
+    le,
+    ge,
+};
 
 pub const BinOp = enum {
     add,
     sub,
     mul,
     div,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        const s = switch (self) {
-            .add => "+",
-            .sub => "-",
-            .mul => "*",
-            .div => "/",
-            .assign => "=",
-        };
-        try writer.writeAll(s);
-    }
+    mod,
 };
 
 pub const UnOp = enum {
     negate,
     not,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        const s = switch (self) {
-            .negate => "-",
-            .not => "!",
-        };
-        try writer.writeAll(s);
-    }
 };

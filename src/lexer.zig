@@ -4,13 +4,6 @@ const token = @import("tokens.zig");
 const Token = token.Token;
 const TokenKind = token.TokenKind;
 
-const Keyword = struct { name: []const u8, kind: TokenKind };
-const keywords: [3]Keyword = [_]Keyword{
-    Keyword{ .name = "let", .kind = .let },
-    Keyword{ .name = "fn", .kind = .fn_ },
-    Keyword{ .name = "return", .kind = .return_ },
-};
-
 const LexError = error{
     InvalidPunct,
     NotANumber,
@@ -55,6 +48,11 @@ pub const Lexer = struct {
         } else {
             return self.src.bytes[self.cursor];
         }
+    }
+
+    fn peek_n_bytes(self: *const Lexer, n: usize) []const u8 {
+        const hi = @min(self.src.bytes.len, self.cursor + n);
+        return self.src.bytes[self.cursor..hi];
     }
 
     fn next_byte(self: *@This()) ?u8 {
@@ -104,36 +102,29 @@ pub const Lexer = struct {
     fn read_punctuation(self: *@This()) !?Token {
         const start = self.current_span();
 
-        // Return null if EOF or if we are not at a punct character.
-        const peek = self.peek_byte() orelse return null;
-        if (!std.ascii.isPunctuation(peek)) return null;
+        const lookahead = self.peek_n_bytes(token.MAX_PUNCT_LEN);
+        var token_length = lookahead.len;
 
-        const punct = self.next_byte().?;
-
-        const kind: TokenKind = switch (punct) {
-            '+' => .plus,
-            '-' => .minus,
-            '*' => .star,
-            '/' => .fslash,
-            '=' => .equals,
-            ':' => .colon,
-            ';' => .semicolon,
-            ',' => .comma,
-            '(' => .lparen,
-            ')' => .rparen,
-            '{' => .lcurly,
-            '}' => .rcurly,
-            else => {
-                try self.diagnostics.emit_error(start, "Invalid token `{c}`", .{punct});
-                return error.Diagnostic;
+        const kind: TokenKind = brk: while (token_length > 0) : (token_length -= 1) {
+            for (token.punctuators) |p| {
+                if (std.mem.eql(u8, lookahead[0..token_length], p.text)) {
+                    break :brk p.kind;
+                }
             }
+        } else {
+            return null;
         };
 
-        const span = self.merge_span(start);
-        return Token{
+
+        for (0..token_length) |_| {
+            _ = self.next_byte();
+        }
+
+        const span = start.merge(self.current_span());
+        return .{
             .kind = kind,
-            .raw = self.src.bytes[span.lo..span.hi],
             .span = span,
+            .raw = self.src.bytes[span.lo..span.hi],
         };
     }
 
@@ -151,8 +142,8 @@ pub const Lexer = struct {
         }
         const span = self.merge_span(start);
         var kind: TokenKind = .ident;
-        for (keywords) |entry| {
-            if (std.mem.eql(u8, self.src.bytes[span.lo..span.hi], entry.name)) {
+        for (token.keywords) |entry| {
+            if (std.mem.eql(u8, self.src.bytes[span.lo..span.hi], entry.text)) {
                 kind = entry.kind;
             }
         }

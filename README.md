@@ -1,19 +1,18 @@
-# zb
+# Blitz
 
-I don't yet have a great name for this, so for the time being I'm going to call
-it ZB = Zig Baby.
+Baby Language In The Zig? idk, we'll workshop it
 
 This was created as a weekend project to learn Zig and finally get some
 hands-on experience with the LLVM API.
 
 # Language
 
-ZB is similar to B. It currently has only 1 type: `i64`. There are no type
+Blitz is currently similar to B. It currently has only 1 type: `i64`. There are no type
 annotations, as every type is inferred to be a `i64`.
 
 _(I will add more types + an actual type checking phase later when I get time.)_
 
-Here is some example zb code (there is no control flow yet haha):
+Here is some example Blitz code (there is no control flow yet haha):
 ```
 fn add(a, b) {
   return a + b;
@@ -28,8 +27,8 @@ fn main() {
 
 # Compiler Usage
 
-Since `zb` is just a frontend for LLVM, `libllvm` is required to build this
-compiler, while `clang` is required to compile `zb`'s output (LLVM IR) into
+Since Blitz is just a frontend for LLVM, `libllvm` is required to build this
+compiler, while `clang` is required to compile Blitz's output (LLVM IR) into
 machine code. The `flake.nix` in this repository includes a devShell that
 provides `pkgs.llvmPackages_21.llvm`, which exposes `libllvm.so`. I'm leaving
 it up to you to get `clang`.

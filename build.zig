@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{
-        .name = "zb",
+        .name = "blitz",
         .use_llvm = false,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),

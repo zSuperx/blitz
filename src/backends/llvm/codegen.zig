@@ -17,6 +17,7 @@ const LLVMSymbolInfo = struct {
 };
 
 var llvm_i64: *llvm.types.LLVMOpaqueType = undefined;
+var llvm_zero: *llvm.types.LLVMOpaqueValue = undefined;
 
 const CodegenError = error{
     OutOfMemory,
@@ -34,6 +35,8 @@ pub const Codegen = struct {
     module: *llvm.types.LLVMOpaqueModule,
     builder: *llvm.types.LLVMOpaqueBuilder,
 
+    current_function: Symbol = undefined,
+
     pub fn init(
         allocator: std.mem.Allocator,
         symbol_table: std.AutoHashMap(Symbol, BaseSymbolInfo),
@@ -41,6 +44,7 @@ pub const Codegen = struct {
     ) !Codegen {
         // init global constants
         llvm_i64 = core.LLVMInt64Type().?;
+        llvm_zero = core.LLVMConstInt(llvm_i64, 0, 0).?;
 
         // Build LLVM-specific symbol table
         var llvm_symbol_table = std.AutoHashMap(Symbol, LLVMSymbolInfo).init(allocator);
@@ -87,11 +91,46 @@ pub const Codegen = struct {
         switch (expr.kind) {
             .number => return self.gen_number_expr(expr),
             .binary => return self.gen_binary_expr(expr),
+            .unary => return self.gen_unary_expr(expr),
             .assign => return self.gen_assign_expr(expr),
             .call => return self.gen_call_expr(expr),
             .variable => return self.gen_variable_expr_rvalue(expr),
-            else => @panic("TODO"),
+            .block => return self.gen_block_expr(expr),
+            .ifelse => return self.gen_if_else_expr(expr),
+            .logic => return self.gen_logic_expr(expr),
+            .cmp => return self.gen_cmp_expr(expr),
         }
+    }
+
+    fn gen_if_else_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+        const if_else = &expr.kind.ifelse;
+
+        const fn_info = self.symbol_table.getEntry(self.current_function).?.value_ptr;
+
+        const then_block = core.LLVMAppendBasicBlock(fn_info.value, "then").?;
+        const else_block = core.LLVMAppendBasicBlock(fn_info.value, "else").?;
+        const merge_block = core.LLVMAppendBasicBlock(fn_info.value, "merge").?;
+
+        const cond_value = try self.gen_expr_rvalue(if_else.cond);
+        const cmp_value = core.LLVMBuildIsNotNull(self.builder, cond_value, "cond");
+        _ = core.LLVMBuildCondBr(self.builder, cmp_value, then_block, else_block);
+
+        core.LLVMPositionBuilderAtEnd(self.builder, then_block);
+        const then_value = try self.gen_expr_rvalue(if_else.then);
+        _ = core.LLVMBuildBr(self.builder, merge_block);
+        const new_then_block = core.LLVMGetInsertBlock(self.builder);
+
+        core.LLVMPositionBuilderAtEnd(self.builder, else_block);
+        const else_value = try self.gen_expr_rvalue(if_else.else_);
+        _ = core.LLVMBuildBr(self.builder, merge_block);
+        const new_else_block = core.LLVMGetInsertBlock(self.builder);
+
+        core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
+        const phi = core.LLVMBuildPhi(self.builder, llvm_i64, "ifelse").?;
+        var incoming_values = [_]@TypeOf(then_value){then_value, else_value};
+        var incoming_blocks = [_]@TypeOf(new_then_block){new_then_block, new_else_block};
+        core.LLVMAddIncoming(phi, @ptrCast(&incoming_values), @ptrCast(&incoming_blocks), 2);
+        return phi;
     }
 
     fn gen_call_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
@@ -114,13 +153,27 @@ pub const Codegen = struct {
         return core.LLVMBuildCall2(self.builder, function_type, callee_value, @ptrCast(arg_values.items), @intCast(arg_values.items.len), "").?;
     }
 
+    fn gen_block_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+        const block = &expr.kind.block;
+        for (block.stmts) |inner_stmt| {
+            _ = try self.gen_stmt(inner_stmt);
+        }
+        if (block.tail) |tail| {
+            return try self.gen_expr_rvalue(tail);
+        } else {
+            return llvm_zero;
+        }
+    }
+
     fn gen_assign_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
         const assign = &expr.kind.assign;
 
         const left = try self.gen_expr_lvalue(assign.left);
         const right = try self.gen_expr_rvalue(assign.right);
 
-        return core.LLVMBuildStore(self.builder, right, left).?;
+        _ = core.LLVMBuildStore(self.builder, right, left).?;
+
+        return llvm_zero;
     }
 
     fn gen_variable_expr_rvalue(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
@@ -132,10 +185,48 @@ pub const Codegen = struct {
             return error.SymbolWithoutValue;
         }
     }
+
     fn gen_number_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
         _ = self;
         const number = expr.kind.number;
         return core.LLVMConstInt(llvm_i64, @truncate(number), 0).?;
+    }
+
+    fn gen_unary_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+        const unary = &expr.kind.unary;
+
+        const inner_value = try self.gen_expr_rvalue(unary.inner);
+
+        switch (unary.op) {
+            .negate => return core.LLVMBuildNeg(self.builder, inner_value, "").?,
+            .not => return core.LLVMBuildNot(self.builder, inner_value, "").?,
+        }
+    }
+
+    fn gen_cmp_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+        const cmp = &expr.kind.cmp;
+
+        const left_value = try self.gen_expr_rvalue(cmp.left);
+        const right_value = try self.gen_expr_rvalue(cmp.right);
+
+        switch (cmp.op) {
+            .lt => return core.LLVMBuildICmp(self.builder, .LLVMIntSLT, left_value, right_value, "").?,
+            .le => return core.LLVMBuildICmp(self.builder, .LLVMIntSLE, left_value, right_value, "").?,
+            .gt => return core.LLVMBuildICmp(self.builder, .LLVMIntSGT, left_value, right_value, "").?,
+            .ge => return core.LLVMBuildICmp(self.builder, .LLVMIntSGE, left_value, right_value, "").?,
+        }
+    }
+
+    fn gen_logic_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
+        const logic = &expr.kind.logic;
+
+        const left_value = try self.gen_expr_rvalue(logic.left);
+        const right_value = try self.gen_expr_rvalue(logic.right);
+
+        switch (logic.op) {
+            .eq => return core.LLVMBuildICmp(self.builder, .LLVMIntEQ, left_value, right_value, "").?,
+            .ne => return core.LLVMBuildICmp(self.builder, .LLVMIntNE, left_value, right_value, "").?,
+        }
     }
 
     fn gen_binary_expr(self: *Codegen, expr: *ast.Expr) !*LLVMValue {
@@ -149,6 +240,7 @@ pub const Codegen = struct {
             .sub => return core.LLVMBuildSub(self.builder, left_value, right_value, "").?,
             .mul => return core.LLVMBuildMul(self.builder, left_value, right_value, "").?,
             .div => return core.LLVMBuildSDiv(self.builder, left_value, right_value, "").?,
+            .mod => return core.LLVMBuildSRem(self.builder, left_value, right_value, "").?,
         }
     }
 
@@ -158,11 +250,30 @@ pub const Codegen = struct {
 
     fn gen_stmt(self: *Codegen, stmt: *ast.Stmt) CodegenError!void {
         switch (stmt.kind) {
-            .let => try self.gen_let_stmt(stmt),
-            .block => try self.gen_block_stmt(stmt),
+            .if_ => try self.gen_if_stmt(stmt),
+            .decl => try self.gen_decl_stmt(stmt),
             .expr => try self.gen_expr_stmt(stmt),
             .return_ => try self.gen_return_stmt(stmt),
         }
+    }
+
+    fn gen_if_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
+        const if_ = &stmt.kind.if_;
+
+        const fn_info = self.symbol_table.getEntry(self.current_function).?.value_ptr;
+
+        const then_block = core.LLVMAppendBasicBlock(fn_info.value, "then").?;
+        const merge_block = core.LLVMAppendBasicBlock(fn_info.value, "merge").?;
+
+        const cond_value = try self.gen_expr_rvalue(if_.cond);
+        const cmp_value = core.LLVMBuildIsNotNull(self.builder, cond_value, "cond");
+        _ = core.LLVMBuildCondBr(self.builder, cmp_value, then_block, merge_block);
+
+        core.LLVMPositionBuilderAtEnd(self.builder, then_block);
+        _ = try self.gen_expr_rvalue(if_.then);
+        _ = core.LLVMBuildBr(self.builder, merge_block);
+
+        core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
     }
 
     fn gen_return_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
@@ -176,21 +287,14 @@ pub const Codegen = struct {
         _ = try self.gen_expr_rvalue(expr.expr);
     }
 
-    fn gen_block_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
-        const block = &stmt.kind.block;
-        for (block.stmts) |inner_stmt| {
-            try self.gen_stmt(inner_stmt);
-        }
-    }
+    fn gen_decl_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
+        const decl = &stmt.kind.decl;
 
-    fn gen_let_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
-        const let = &stmt.kind.let;
-
-        const name = try std.fmt.allocPrintSentinel(self.allocator, "{f}", .{let.variable}, 0);
+        const name = try std.fmt.allocPrintSentinel(self.allocator, "{f}", .{decl.variable}, 0);
         const ptr_value = core.LLVMBuildAlloca(self.builder, llvm_i64, name);
-        self.symbol_table.getEntry(let.variable.symbol.?).?.value_ptr.value = ptr_value;
+        self.symbol_table.getEntry(decl.variable.symbol.?).?.value_ptr.value = ptr_value;
 
-        if (let.init) |init_expr| {
+        if (decl.init) |init_expr| {
             const init_value = try self.gen_expr_rvalue(init_expr);
             _ = core.LLVMBuildStore(self.builder, init_value, ptr_value);
         }
@@ -201,6 +305,7 @@ pub const Codegen = struct {
     //
 
     fn gen_function(self: *Codegen, function: *ast.Function) !void {
+        self.current_function = function.name.symbol.?;
         const function_value = self.symbol_table.getEntry(function.name.symbol.?).?.value_ptr.value;
 
         // Create entrypoint and position builder at the end of it
@@ -219,7 +324,11 @@ pub const Codegen = struct {
             self.symbol_table.getEntry(arg.symbol.?).?.value_ptr.value = arg_ptr;
         }
 
-        try self.gen_stmt(function.body);
+        const tail = try self.gen_expr_rvalue(function.body);
+        const bb = core.LLVMGetInsertBlock(self.builder);
+        if (core.LLVMGetBasicBlockTerminator(bb) == null) {
+            _ = core.LLVMBuildRet(self.builder, tail);
+        }
 
         const status = llvm.analysis.LLVMVerifyFunction(function_value, .LLVMPrintMessageAction);
         if (status != 0) return error.LLVMVerifyFailed;

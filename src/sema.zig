@@ -20,7 +20,12 @@ pub const QualType = union(enum) {
 pub const SymbolInfo = struct {
     name: StringId,
     symbol: Symbol,
+    decl_span: diag.Span,
+    is_param: bool,
+    mutable: bool,
     type_: QualType = .int64,
+    initialized: bool = false,
+    mutated: bool = false,
 };
 
 pub const SemaError = error{
@@ -50,15 +55,25 @@ pub const Sema = struct {
     // Helper functions
     //
 
-    fn add_binding(self: *Sema, ident: StringId) !Symbol {
+    fn add_binding(self: *Sema, opts: struct {
+        span: diag.Span,
+        ident: StringId,
+        mutable: bool = false,
+        initialized: bool = false,
+        is_param: bool = false,
+    }) !Symbol {
         var inner_most_scope = &self.scopes.items[self.scopes.items.len - 1];
         const symbol = Symbol{ .id = self.symbol_table.count() + 1 };
         const info = SymbolInfo{
-            .name = ident,
+            .name = opts.ident,
+            .decl_span = opts.span,
+            .initialized = opts.initialized,
+            .is_param = opts.is_param,
             .symbol = symbol,
+            .mutable = opts.mutable,
         };
 
-        const scope_entry = try inner_most_scope.getOrPut(ident);
+        const scope_entry = try inner_most_scope.getOrPut(opts.ident);
         if (scope_entry.found_existing) return error.DuplicateSymbol;
         scope_entry.value_ptr.* = symbol;
 
@@ -94,33 +109,83 @@ pub const Sema = struct {
     fn sema_expr(self: *Sema, expr: *ast.Expr) SemaError!void {
         switch (expr.kind) {
             .number => {},
-            .variable => {
-                try self.sema_variable_expr(expr);
-            },
-            .assign => {
-                try self.sema_assign_expr(expr);
-            },
-            .binary => {
-                try self.sema_binary_expr(expr);
-            },
-            .unary => {
-                try self.sema_unary_expr(expr);
-            },
-            .call => {
-                try self.sema_call_expr(expr);
-            },
+            .variable => try self.sema_variable_expr(expr),
+            .block => try self.sema_block_expr(expr),
+            .assign => try self.sema_assign_expr(expr),
+            .binary => try self.sema_binary_expr(expr),
+            .unary => try self.sema_unary_expr(expr),
+            .call => try self.sema_call_expr(expr),
+            .ifelse => try self.sema_if_else_expr(expr),
+            .logic => try self.sema_logic_expr(expr),
+            .cmp => try self.sema_cmp_expr(expr),
         }
+    }
+
+    fn sema_if_else_expr(self: *Sema, expr: *ast.Expr) !void {
+        const if_else = &expr.kind.ifelse;
+
+        // TODO: type check cond to be bool
+        try self.sema_expr(if_else.cond);
+
+        // TODO: type check to make sure both branches are same type
+        try self.sema_expr(if_else.then);
+        try self.sema_expr(if_else.else_);
+    }
+
+    fn sema_block_expr(self: *Sema, expr: *ast.Expr) !void {
+        const block = &expr.kind.block;
+        try self.push_scope();
+        for (block.stmts) |inner_stmt| {
+            try self.sema_stmt(inner_stmt);
+        }
+
+        if (block.tail) |tail| {
+            try self.sema_expr(tail);
+        }
+
+        self.pop_scope();
     }
 
     fn sema_assign_expr(self: *Sema, expr: *ast.Expr) !void {
         const assign = &expr.kind.assign;
 
+        try self.sema_expr(assign.left);
+        try self.sema_expr(assign.right);
+
+        if (std.meta.activeTag(assign.right.kind) == .assign) {
+            try self.diagnostics.emit_warning(
+                assign.right.span,
+                "Assignment expressions evaluate to 0, so this may not be what you intended",
+                .{},
+            );
+        }
+
         if (!assign.left.is_lvalue()) {
             try self.diagnostics.emit_error(assign.left.span, "Cannot assign to this type of expression", .{});
         }
 
-        try self.sema_expr(assign.left);
-        try self.sema_expr(assign.right);
+        if (assign.left.as_variable()) |symbol| {
+            const info = self.symbol_table.getEntry(symbol).?.value_ptr;
+            if (!info.initialized) {
+                // if variable has not been initialized yet then mark it as init and move on
+                info.initialized = true;
+            } else {
+                // happy path: mark mutable variable as mutated
+                info.mutated = true;
+            }
+        }
+    }
+
+    fn sema_logic_expr(self: *Sema, expr: *ast.Expr) !void {
+        const logic = &expr.kind.logic;
+        try self.sema_expr(logic.left);
+        try self.sema_expr(logic.right);
+    }
+
+    fn sema_cmp_expr(self: *Sema, expr: *ast.Expr) !void {
+        const cmp = &expr.kind.cmp;
+        try self.sema_expr(cmp.left);
+        try self.sema_expr(cmp.right);
     }
 
     fn sema_binary_expr(self: *Sema, expr: *ast.Expr) !void {
@@ -157,43 +222,51 @@ pub const Sema = struct {
 
     fn sema_stmt(self: *Sema, stmt: *ast.Stmt) SemaError!void {
         switch (stmt.kind) {
-            .let => {
-                try self.sema_let_stmt(stmt);
-            },
-            .block => {
-                try self.sema_block_stmt(stmt);
-            },
-            .expr => {
-                try self.sema_expr_stmt(stmt);
-            },
-            .return_ => {
-                try self.sema_return_stmt(stmt);
-            },
+            .if_ => try self.sema_if_stmt(stmt),
+            .decl => try self.sema_decl_stmt(stmt),
+            .expr => try self.sema_expr_stmt(stmt),
+            .return_ => try self.sema_return_stmt(stmt),
         }
     }
 
-    fn sema_let_stmt(self: *Sema, stmt: *ast.Stmt) !void {
-        const let = &stmt.kind.let;
-        if (let.init) |init_expr| {
+    fn sema_if_stmt(self: *Sema, stmt: *ast.Stmt) !void {
+        const if_ = &stmt.kind.if_;
+
+        // TODO: type check cond to make sure its a boolean
+        try self.sema_expr(if_.cond);
+
+        try self.sema_expr(if_.then);
+    }
+
+    fn sema_decl_stmt(self: *Sema, stmt: *ast.Stmt) !void {
+        const decl = &stmt.kind.decl;
+        var initialized = false;
+        if (decl.init) |init_expr| {
             try self.sema_expr(init_expr);
+            initialized = true;
+
+            if (std.meta.activeTag(init_expr.kind) == .assign) {
+                try self.diagnostics.emit_warning(
+                    init_expr.span,
+                    "Assignment expressions evaluate to 0, so this may not be what you intended",
+                    .{},
+                );
+            }
         }
-        const symbol = self.add_binding(let.variable.ident) catch |err| switch (err) {
+
+        const symbol = self.add_binding(.{
+            .span = stmt.span,
+            .ident = decl.variable.ident,
+            .initialized = initialized,
+            .mutable = decl.mutable,
+        }) catch |err| switch (err) {
             error.DuplicateSymbol => {
-                try self.diagnostics.emit_error(stmt.span, "Variable {f} already exists in this scope", .{let.variable});
+                try self.diagnostics.emit_error(stmt.span, "Variable {f} already exists in this scope", .{decl.variable});
                 return error.Diagnostic;
             },
             else => return err,
         };
-        let.variable.symbol = symbol;
-    }
-
-    fn sema_block_stmt(self: *Sema, stmt: *ast.Stmt) !void {
-        const block = &stmt.kind.block;
-        try self.push_scope();
-        for (block.stmts) |inner_stmt| {
-            try self.sema_stmt(inner_stmt);
-        }
-        self.pop_scope();
+        decl.variable.symbol = symbol;
     }
 
     fn sema_expr_stmt(self: *Sema, stmt: *ast.Stmt) !void {
@@ -221,9 +294,13 @@ pub const Sema = struct {
         try self.push_scope();
 
         for (function.arguments) |*arg| {
-            const symbol = self.add_binding(arg.ident) catch |err| switch (err) {
+            const symbol = self.add_binding(.{
+                .span = function.span,
+                .ident = arg.ident,
+                .is_param = true,
+            }) catch |err| switch (err) {
                 error.DuplicateSymbol => {
-                    try self.diagnostics.emit_error(function.span, "Argument `{f}` already exists", .{arg});
+                    try self.diagnostics.emit_error(function.span, "Argument `{s}` already exists", .{arg.ident.lookup()});
                     return error.Diagnostic;
                 },
                 else => return err,
@@ -231,7 +308,15 @@ pub const Sema = struct {
             arg.symbol = symbol;
         }
 
-        try self.sema_block_stmt(function.body);
+        try self.sema_block_expr(function.body);
+
+        const block = &function.body.kind.block;
+        if (block.tail == null and block.stmts.len > 0) {
+            const last = block.stmts[block.stmts.len - 1];
+            if (last.kind == .return_) {
+                try self.diagnostics.emit_warning(last.span, "Unncessary `return` at tail of function", .{});
+            }
+        }
 
         self.pop_scope();
     }
@@ -242,7 +327,10 @@ pub const Sema = struct {
         try self.push_scope();
 
         for (program.functions) |function| {
-            const symbol = self.add_binding(function.name.ident) catch |err| switch (err) {
+            const symbol = self.add_binding(.{
+                .span = function.span,
+                .ident = function.name.ident,
+            }) catch |err| switch (err) {
                 error.DuplicateSymbol => brk: {
                     try self.diagnostics.emit_error(function.span, "Function `{s}` already exists", .{function.name.ident.lookup()});
                     break :brk Symbol.invalid;
@@ -256,7 +344,25 @@ pub const Sema = struct {
             try self.sema_function(function);
         }
 
+        var iter = self.symbol_table.valueIterator();
+        while (iter.next()) |info| {
+            if (info.mutable and !info.mutated) {
+                try self.diagnostics.emit_warning(
+                    info.decl_span,
+                    "Variable `{s}` does not need to be mutable. Consider changing it to `const`.",
+                    .{info.name.lookup()},
+                );
+            }
+            if (!info.mutable and info.mutated) {
+                try self.diagnostics.emit_error(
+                    info.decl_span,
+                    "Cannot assign to const variable `{s}`. Consider changing it to `mut`.",
+                    .{info.name.lookup()},
+                );
+            }
+        }
+
         self.pop_scope();
-        if (self.diagnostics.list.items.len > 0) return error.Diagnostic;
+        if (self.diagnostics.errors > 0) return error.Diagnostic;
     }
 };

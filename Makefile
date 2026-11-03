@@ -1,2 +1,3 @@
 clean:
+	@echo Cleaning all residue files...
 	rm -rf *.ll *.s a.out

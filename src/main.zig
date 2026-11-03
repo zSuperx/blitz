@@ -20,12 +20,18 @@ pub fn main(init: std.process.Init) !void {
 
     const cwd = std.Io.Dir.cwd();
 
-    const bytes = try cwd.readFileAlloc(
+    const bytes = cwd.readFileAlloc(
         init.io,
         cfg.ifile,
         init.gpa,
         .unlimited,
-    );
+    ) catch |err| {
+        switch (err) {
+            error.FileNotFound => die("File `{s}` not found", .{cfg.ifile}),
+            else => return err,
+        }
+    };
+
     defer init.gpa.free(bytes);
 
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -35,14 +41,14 @@ pub fn main(init: std.process.Init) !void {
 
     const source = try diag.Source.init(alloc, cfg.ifile, bytes);
 
-    var file_lexer = Lexer.init(alloc);
-    const tokens = file_lexer.tokenize(&source) catch |err| switch (err) {
-        error.Diagnostic => {
-            try file_lexer.diagnostics.print_all();
-            die("Could not parse file", .{});
-        },
+    var the_lexer = Lexer.init(alloc);
+    const tokens = the_lexer.tokenize(&source) catch |err| switch (err) {
+        error.Diagnostic => undefined,
         else => return err,
     };
+
+    try the_lexer.diagnostics.print_all();
+    if (the_lexer.diagnostics.errors > 0) die("Could not compile program", .{});
 
     // Uncomment this to print all tokens
     // for (tokens) |tok| {
@@ -50,25 +56,25 @@ pub fn main(init: std.process.Init) !void {
     // }
 
     var string_pool = sp.StringPool.init(alloc);
-    var file_parser = Parser.init(alloc, &string_pool);
-    const program = file_parser.parse_program(tokens, &source) catch |err| switch (err) {
-        error.Diagnostic => {
-            try file_parser.diagnostics.print_all();
-            die("Could not parse file", .{});
-        },
+    var the_parser = Parser.init(alloc, &string_pool);
+    const program = the_parser.parse_program(tokens, &source) catch |err| switch (err) {
+        error.Diagnostic => undefined,
         else => return err,
     };
 
-    var file_sema = try Sema.init(alloc);
-    file_sema.sema_program(program, &source) catch |err| switch (err) {
-        error.Diagnostic => {
-            try file_sema.diagnostics.print_all();
-            die("Could not compile program", .{});
-        },
+    try the_parser.diagnostics.print_all();
+    if (the_parser.diagnostics.errors > 0) die("Could not compile program", .{});
+
+    var the_sema = try Sema.init(alloc);
+    the_sema.sema_program(program, &source) catch |err| switch (err) {
+        error.Diagnostic => {},
         else => return err,
     };
 
-    var codegen = try backends.llvm.Codegen.init(alloc, file_sema.symbol_table, cfg.ifile);
+    try the_sema.diagnostics.print_all();
+    if (the_sema.diagnostics.errors > 0) die("Could not compile program", .{});
+
+    var codegen = try backends.llvm.Codegen.init(alloc, the_sema.symbol_table, cfg.ifile);
     const llvm_module_ir = try codegen.gen_program(program);
 
     switch (cfg.ofile) {
@@ -85,10 +91,10 @@ pub fn main(init: std.process.Init) !void {
                 .argv = &.{ "clang", "tmp.ll", "-O3", "-o", file },
             });
             _ = result;
-            // if (result.stderr.len > 0) std.debug.print("{s}\n", .{result.stderr});
+
+            // try cwd.deleteFile(init.io, "tmp.ll");
         },
     }
-
 }
 
 const Config = struct {
@@ -114,7 +120,11 @@ fn parse_args(args: std.process.Args) !Config {
             if (ofile) |_| {
                 die("More than one output file provided", .{});
             } else {
-                ofile = .{ .file = iter.next() orelse die("-o expects a value", .{}) };
+                const next = iter.next() orelse die("-o expects a value", .{});
+                ofile = if (std.mem.eql(u8, next, "-"))
+                    .stdout
+                else
+                    .{ .file = next };
             }
         } else {
             if (ifile) |_| {
