@@ -16,7 +16,7 @@ annotations, as every type is inferred to be a `i64`.
 
 _(I will add more types + an actual type checking phase later when I get time.)_
 
-Here is some example Blitz code:
+Here is some example Blitz code (syntax and behavior highly subject to change):
 ```rs
 fn add(a, b) {
   a + b
@@ -28,11 +28,9 @@ fn main(argc, argv) {
 
     if (argc > 1) {
         b = add(a, b);
-        b
     } else {
         return 100;
     }
-
 }
 ```
 
@@ -48,11 +46,11 @@ _(I will implement a custom backend when I get time)_
 
 ## How I made it
 
-...with great difficulty and struggle. Also much of this compiler was written
-while I was drunk lol.
+...with great difficulty and struggle, especially since much of this compiler
+was written while I was drunk lol.
 
-Also as per the Zig philosophy, there is zero AI generated code in this
-repository. However, I did use it to sift through `llvm-zig`'s generated
+As per the Zig philosophy, there is **zero AI generated code in this
+repository**. However, I did use it to sift through `llvm-zig`'s generated
 bindings since the names didn't line up with the Kaleidoscope tutorial. This
 helped me save some time, but had no effect on the code I wrote.
 
