@@ -1,11 +1,15 @@
 # Blitz
 
-Baby Language In The Zig? idk, we'll workshop it
+**B**uilt (this) **L**anguage **I**n **T**yrannical **Z**ig.
+
+Why tyrannical? Because it's a cool word that starts with the letter T.
+
+## About
 
 This was created as a weekend project to learn Zig and finally get some
 hands-on experience with the LLVM API.
 
-# Language
+## Language
 
 Blitz is currently similar to B. It currently has only 1 type: `i64`. There are no type
 annotations, as every type is inferred to be a `i64`.
@@ -32,7 +36,7 @@ fn main(argc, argv) {
 }
 ```
 
-# Compiler Usage
+## Compiler Usage
 
 Since Blitz is just a frontend for LLVM, `libllvm` is required to build this
 compiler, while `clang` is required to compile Blitz's output (LLVM IR) into
@@ -42,7 +46,7 @@ it up to you to get `clang`.
 
 _(I will implement a custom backend when I get time)_
 
-# How I made it
+## How I made it
 
 ...with great difficulty and struggle. Also much of this compiler was written
 while I was drunk lol.
@@ -52,7 +56,7 @@ repository. However, I did use it to sift through `llvm-zig`'s generated
 bindings since the names didn't line up with the Kaleidoscope tutorial. This
 helped me save some time, but had no effect on the code I wrote.
 
-# Credits
+## Credits
 
 * [llvm-zig](https://github.com/kassane/llvm-zig)
 * [Kaleidoscope: Code generation to LLVM IR](https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl03.html#kaleidoscope-code-generation-to-llvm-ir)
