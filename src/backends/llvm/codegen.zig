@@ -114,7 +114,6 @@ pub const Codegen = struct {
         return llvm_zero;
     }
 
-
     fn gen_if_else_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const if_else = &expr.kind.ifelse;
 
@@ -130,87 +129,59 @@ pub const Codegen = struct {
         const cmp_value = core.LLVMBuildIsNotNull(self.builder, cond_value, "cond");
         _ = core.LLVMBuildCondBr(self.builder, cmp_value, then_block, else_block);
 
-        if (if_else.is_stmt) {
+        var incoming_values = std.ArrayList(LLVMValueRef).empty;
+        var incoming_blocks = std.ArrayList(?@TypeOf(then_block)).empty;
 
-            // THEN
+        // THEN
 
-            core.LLVMPositionBuilderAtEnd(self.builder, then_block);
-            _ = try self.gen_expr_rvalue(if_else.then);
-            const new_then_block = core.LLVMGetInsertBlock(self.builder);
+        core.LLVMPositionBuilderAtEnd(self.builder, then_block);
+        const then_value = try self.gen_expr_rvalue(if_else.then);
+        const new_then_block = core.LLVMGetInsertBlock(self.builder);
 
-            // If the else branch is not terminated, jump to merge
-            if (core.LLVMGetBasicBlockTerminator(new_then_block) == null) {
-                _ = core.LLVMBuildBr(self.builder, merge_block);
-            }
+        // If the then branch is not terminated, jump to merge and add Phi edge
+        if (core.LLVMGetBasicBlockTerminator(new_then_block) == null) {
+            _ = core.LLVMBuildBr(self.builder, merge_block);
+            try incoming_values.append(self.allocator, then_value);
+            try incoming_blocks.append(self.allocator, new_then_block);
+        }
 
-            // ELSE
+        // ELSE
 
-            core.LLVMPositionBuilderAtEnd(self.builder, else_block);
-            if (if_else.else_) |else_| {
-                _ = try self.gen_expr_rvalue(else_);
-                const new_else_block = core.LLVMGetInsertBlock(self.builder);
+        core.LLVMPositionBuilderAtEnd(self.builder, else_block);
 
-                // If the else branch is not terminated, jump to merge and add Phi edge
-                if (core.LLVMGetBasicBlockTerminator(new_else_block) == null) {
-                    _ = core.LLVMBuildBr(self.builder, merge_block);
-                }
-            } else {
-                _ = core.LLVMBuildBr(self.builder, merge_block);
-            }
+        // If the else branch exists, compile it and use its value. Otherwise
+        // just evalutate the else to 0
+        const else_value = if (if_else.else_) |else_|
+            try self.gen_expr_rvalue(else_)
+        else
+            llvm_zero;
 
-            core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
+        const new_else_block = core.LLVMGetInsertBlock(self.builder);
 
+        // If the else branch is not terminated, jump to merge and add Phi edge
+        if (core.LLVMGetBasicBlockTerminator(new_else_block) == null) {
+            _ = core.LLVMBuildBr(self.builder, merge_block);
+            try incoming_values.append(self.allocator, else_value);
+            try incoming_blocks.append(self.allocator, new_else_block);
+        }
+
+        const count = incoming_blocks.items.len;
+
+        core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
+        if (count == 0) {
+            // If both branches terminate and neither reach the merge, mark the merge as unreachable
+            _ = core.LLVMBuildUnreachable(self.builder);
             return llvm_zero;
         } else {
-            var incoming_values = std.ArrayList(LLVMValueRef).empty;
-            var incoming_blocks = std.ArrayList(?@TypeOf(then_block)).empty;
-
-            // THEN
-
-            core.LLVMPositionBuilderAtEnd(self.builder, then_block);
-            const then_value = try self.gen_expr_rvalue(if_else.then);
-            const new_then_block = core.LLVMGetInsertBlock(self.builder);
-
-            // If the then branch is not terminated, jump to merge and add Phi edge
-            if (core.LLVMGetBasicBlockTerminator(new_then_block) == null) {
-                _ = core.LLVMBuildBr(self.builder, merge_block);
-                try incoming_values.append(self.allocator, then_value);
-                try incoming_blocks.append(self.allocator, new_then_block);
-            }
-
-            // ELSE
-
-            core.LLVMPositionBuilderAtEnd(self.builder, else_block);
-            // It's safe to unwrap else_.? here since this is the expression
-            // variant of if so an else must exist
-            const else_value = try self.gen_expr_rvalue(if_else.else_.?);
-            const new_else_block = core.LLVMGetInsertBlock(self.builder);
-
-            // If the else branch is not terminated, jump to merge and add Phi edge
-            if (core.LLVMGetBasicBlockTerminator(new_else_block) == null) {
-                _ = core.LLVMBuildBr(self.builder, merge_block);
-                try incoming_values.append(self.allocator, else_value);
-                try incoming_blocks.append(self.allocator, new_else_block);
-            }
-
-            const count = incoming_blocks.items.len;
-
-            core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
-            if (count == 0) {
-                // If both branches terminate and neither reach the merge, mark the merge as unreachable
-                _ = core.LLVMBuildUnreachable(self.builder);
-                return llvm_zero;
-            } else {
-                // Otherwise add whatever branches DO reach the merge as incoming edges to the phi
-                const phi = core.LLVMBuildPhi(self.builder, llvm_i64, "ifelse").?;
-                core.LLVMAddIncoming(
-                    phi,
-                    @ptrCast(incoming_values.items),
-                    @ptrCast(incoming_blocks.items),
-                    @intCast(count),
-                );
-                return phi;
-            }
+            // Otherwise add whatever branches DO reach the merge as incoming edges to the phi
+            const phi = core.LLVMBuildPhi(self.builder, llvm_i64, "ifelse").?;
+            core.LLVMAddIncoming(
+                phi,
+                @ptrCast(incoming_values.items),
+                @ptrCast(incoming_blocks.items),
+                @intCast(count),
+            );
+            return phi;
         }
     }
 
@@ -320,7 +291,6 @@ pub const Codegen = struct {
 
     fn gen_stmt(self: *Codegen, stmt: *ast.Stmt) CodegenError!void {
         switch (stmt.kind) {
-            .if_ => try self.gen_if_stmt(stmt),
             .decl => try self.gen_decl_stmt(stmt),
             .assign => return self.gen_assign_stmt(stmt),
             .expr => try self.gen_expr_stmt(stmt),
@@ -348,50 +318,6 @@ pub const Codegen = struct {
                 _ = core.LLVMBuildStore(self.builder, new_left_val, left_ptr);
             },
         }
-    }
-
-    fn gen_if_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
-        const if_ = &stmt.kind.if_;
-
-        const fn_info = self.symbol_table.getEntry(self.current_function).?.value_ptr;
-
-        const then_block = core.LLVMAppendBasicBlock(fn_info.value, "then").?;
-        const else_block = core.LLVMAppendBasicBlock(fn_info.value, "else").?;
-        const merge_block = core.LLVMAppendBasicBlock(fn_info.value, "merge").?;
-
-        // COND
-
-        const cond_value = try self.gen_expr_rvalue(if_.cond);
-        const cmp_value = core.LLVMBuildIsNotNull(self.builder, cond_value, "cond");
-
-        const condbr_target = if (if_.else_) |_| else_block else merge_block;
-        _ = core.LLVMBuildCondBr(self.builder, cmp_value, then_block, condbr_target);
-
-        // THEN
-
-        core.LLVMPositionBuilderAtEnd(self.builder, then_block);
-        _ = try self.gen_expr_rvalue(if_.then);
-        const new_then_block = core.LLVMGetInsertBlock(self.builder);
-
-        // If the else branch is not terminated, jump to merge
-        if (core.LLVMGetBasicBlockTerminator(new_then_block) == null) {
-            _ = core.LLVMBuildBr(self.builder, merge_block);
-        }
-
-        // ELSE
-
-        if (if_.else_) |else_| {
-            core.LLVMPositionBuilderAtEnd(self.builder, else_block);
-            _ = try self.gen_expr_rvalue(else_);
-            const new_else_block = core.LLVMGetInsertBlock(self.builder);
-
-            // If the else branch is not terminated, jump to merge and add Phi edge
-            if (core.LLVMGetBasicBlockTerminator(new_else_block) == null) {
-                _ = core.LLVMBuildBr(self.builder, merge_block);
-            }
-        }
-
-        core.LLVMPositionBuilderAtEnd(self.builder, merge_block);
     }
 
     fn gen_expr_stmt(self: *Codegen, stmt: *ast.Stmt) !void {

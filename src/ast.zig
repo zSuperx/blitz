@@ -42,7 +42,6 @@ pub const Stmt = struct {
         decl: DeclStmt,
         assign: AssignStmt,
         expr: ExprStmt,
-        if_: IfElseExpr,
     },
     span: diag.Span,
 
@@ -115,6 +114,7 @@ pub const Expr = struct {
         return_: ReturnExpr,
     },
     span: diag.Span,
+    is_stmt: bool = false,
 
     pub fn as_if_else(self: *Expr) ?*IfElseExpr {
         switch (self.kind) {
@@ -166,7 +166,6 @@ pub const IfElseExpr = struct {
     cond: *Expr,
     then: *Expr,
     else_: ?*Expr,
-    is_stmt: bool = false,
 };
 
 pub const CmpExpr = struct {

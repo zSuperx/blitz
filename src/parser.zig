@@ -365,9 +365,6 @@ pub const Parser = struct {
             .const_, .mut => {
                 p.kind = .{ .decl = try self.parse_decl_stmt() };
             },
-            // .if_ => {
-            //     p.kind = .{ .if_ = try self.parse_if_stmt() };
-            // },
             else => {
                 const expr = try self.parse_expr_1(get_op_power(.eq).?.left + 1);
 
@@ -402,43 +399,6 @@ pub const Parser = struct {
         return p;
     }
 
-    fn parse_if_stmt(self: *Parser) !ast.IfStmt {
-        _ = try self.expect_tok(.if_);
-
-        _ = try self.expect_tok(.lparen);
-        const cond = try self.parse_expr();
-        _ = try self.expect_tok(.rparen);
-
-        const then = try self.parse_expr();
-
-        // This checks if the last token munched after parsing an expression
-        // was an rcurly or a semi. If it's neither, then we should expect a
-        // semi.
-        if (self.last_token) |t| {
-            if (t.kind != .semicolon and t.kind != .rcurly)
-                _ = try self.expect_tok(.semicolon);
-        }
-
-        var else_: ?*ast.Expr = null;
-
-        // If we see an else, parse the full else block the same way we did the
-        // then block
-        if (self.peek_tok_is(.else_)) {
-            _ = try self.expect_tok(.else_);
-            else_ = try self.parse_expr();
-            if (self.last_token) |t| {
-                if (t.kind != .semicolon and t.kind != .rcurly)
-                    _ = try self.expect_tok(.semicolon);
-            }
-        }
-
-        return .{
-            .cond = cond,
-            .then = then,
-            .else_ = else_,
-        };
-    }
-
     fn parse_decl_stmt(self: *Parser) !ast.DeclStmt {
         const declarator = try self.expect_one_of(&.{ .const_, .mut });
 
@@ -464,7 +424,6 @@ pub const Parser = struct {
     fn parse_return_expr(self: *Parser) !ast.ReturnExpr {
         _ = try self.expect_tok(.return_);
         const value = try self.parse_expr();
-        _ = try self.expect_tok(.semicolon);
         return .{ .value = value };
     }
 

@@ -133,7 +133,7 @@ pub const Sema = struct {
         // If STATEMENTS can omit their else branch
         if (if_else.else_) |else_| {
             try self.sema_expr(else_);
-        } else if (!if_else.is_stmt) {
+        } else if (!expr.is_stmt) {
             // If EXPRESSIONS cannot
             try self.diagnostics.emit_error(
                 expr.span,
@@ -203,7 +203,6 @@ pub const Sema = struct {
 
     fn sema_stmt(self: *Sema, stmt: *ast.Stmt) SemaError!void {
         switch (stmt.kind) {
-            .if_ => try self.sema_if_stmt(stmt),
             .assign => try self.sema_assign_stmt(stmt),
             .decl => try self.sema_decl_stmt(stmt),
             .expr => try self.sema_expr_stmt(stmt),
@@ -232,13 +231,6 @@ pub const Sema = struct {
         }
     }
 
-    fn sema_if_stmt(self: *Sema, stmt: *ast.Stmt) !void {
-        const if_ = &stmt.kind.if_;
-        _ = if_;
-        _ = self;
-        // try self.sema_if_else_expr(if_, true);
-    }
-
     fn sema_decl_stmt(self: *Sema, stmt: *ast.Stmt) !void {
         const decl = &stmt.kind.decl;
         var initialized = false;
@@ -264,9 +256,7 @@ pub const Sema = struct {
 
     fn sema_expr_stmt(self: *Sema, stmt: *ast.Stmt) !void {
         const expr = stmt.kind.expr;
-        if (expr.as_if_else()) |ifelse| {
-            ifelse.is_stmt = true;
-        }
+        expr.is_stmt = true;
         try self.sema_expr(expr);
     }
 
@@ -307,13 +297,21 @@ pub const Sema = struct {
         try self.sema_block_expr(function.body);
 
         const block = &function.body.kind.block;
-        if (block.tail == null and block.stmts.len > 0) {
-            const last = block.stmts[block.stmts.len - 1];
-            if (last.as_expr()) |expr| {
+        var unnecessary_return_span: ?diag.Span = null;
+        if (block.tail) |tail| {
+            if (tail.kind == .return_) unnecessary_return_span = tail.span;
+        } else if (block.stmts.len > 0) {
+            if (block.stmts[block.stmts.len - 1].as_expr()) |expr| {
                 if (expr.kind == .return_)
-                    try self.diagnostics.emit_warning(last.span, "Unncessary `return` at tail of function", .{});
+                    unnecessary_return_span = expr.span;
             }
         }
+
+        if (unnecessary_return_span) |span| try self.diagnostics.emit_warning(
+            span,
+            "Unnecessary `return` at tail of function.",
+            .{},
+        );
 
         self.pop_scope();
     }
