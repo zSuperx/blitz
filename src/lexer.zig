@@ -1,6 +1,7 @@
 const std = @import("std");
 const diag = @import("diag.zig");
 const token = @import("tokens.zig");
+pub const state = @import("state.zig");
 const Token = token.Token;
 const TokenKind = token.TokenKind;
 
@@ -13,11 +14,12 @@ const LexError = error{
 
 pub const Lexer = struct {
     allocator: std.mem.Allocator,
-    diagnostics: diag.DiagnosticList = undefined,
-    src: *const diag.Source = undefined,
+    bytes: []const u8 = undefined,
+    source_id: usize = undefined,
     cursor: usize = 0,
     row: usize = 0,
     col: usize = 0,
+    bol: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Lexer {
         return .{
@@ -35,6 +37,7 @@ pub const Lexer = struct {
             .hi = self.cursor,
             .row = self.col,
             .col = self.row,
+            .source_id = self.source_id,
         };
     }
 
@@ -43,16 +46,16 @@ pub const Lexer = struct {
     }
 
     fn peek_byte(self: *const @This()) ?u8 {
-        if (self.cursor >= self.src.bytes.len) {
+        if (self.cursor >= self.bytes.len) {
             return null;
         } else {
-            return self.src.bytes[self.cursor];
+            return self.bytes[self.cursor];
         }
     }
 
     fn peek_n_bytes(self: *const Lexer, n: usize) []const u8 {
-        const hi = @min(self.src.bytes.len, self.cursor + n);
-        return self.src.bytes[self.cursor..hi];
+        const hi = @min(self.bytes.len, self.cursor + n);
+        return self.bytes[self.cursor..hi];
     }
 
     fn next_byte(self: *@This()) ?u8 {
@@ -61,6 +64,7 @@ pub const Lexer = struct {
         if (byte == '\n') {
             self.col += 1;
             self.row = 0;
+            self.bol = self.cursor;
         } else {
             self.row += 1;
         }
@@ -94,7 +98,7 @@ pub const Lexer = struct {
 
         return Token{
             .kind = .{ .number = buffer },
-            .raw = self.src.bytes[span.lo..span.hi],
+            .raw = self.bytes[span.lo..span.hi],
             .span = span,
         };
     }
@@ -123,7 +127,7 @@ pub const Lexer = struct {
         return .{
             .kind = kind,
             .span = span,
-            .raw = self.src.bytes[span.lo..span.hi],
+            .raw = self.bytes[span.lo..span.hi],
         };
     }
 
@@ -142,14 +146,14 @@ pub const Lexer = struct {
         const span = self.merge_span(start);
         var kind: TokenKind = .ident;
         for (token.keywords) |entry| {
-            if (std.mem.eql(u8, self.src.bytes[span.lo..span.hi], entry.text)) {
+            if (std.mem.eql(u8, self.bytes[span.lo..span.hi], entry.text)) {
                 kind = entry.kind;
             }
         }
 
         return Token{
             .kind = kind,
-            .raw = self.src.bytes[span.lo..span.hi],
+            .raw = self.bytes[span.lo..span.hi],
             .span = span,
         };
     }
@@ -179,10 +183,9 @@ pub const Lexer = struct {
 
             while (true) {
                 const byte = self.next_byte() orelse {
-                    try self.diagnostics.emit_error(
-                        self.current_span(),
-                        "Unterminated block comment. Terminate it with `*/`",
-                        .{},
+                    state.diagnostics.emit_error(
+                        "Unterminated block comment. Perhaps you forgot to add `*/`\n{f}",
+                        .{self.current_span()},
                     );
                     return error.Diagnostic;
                 };
@@ -214,14 +217,14 @@ pub const Lexer = struct {
         // EOF
         return Token{
             .kind = .eof,
-            .raw = self.src.bytes[self.cursor..self.cursor],
+            .raw = self.bytes[self.cursor..self.cursor],
             .span = self.current_span(),
         };
     }
 
-    pub fn tokenize(self: *@This(), source: *const diag.Source) LexError![]const Token {
-        self.diagnostics = .init(self.allocator, source);
-        self.src = source;
+    pub fn tokenize(self: *@This(), source_id: usize) LexError![]const Token {
+        self.bytes = state.source_files.items[source_id].bytes;
+        self.source_id = source_id;
         self.cursor = 0;
         self.row = 0;
         self.col = 0;

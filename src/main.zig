@@ -1,13 +1,14 @@
 pub const std = @import("std");
 pub const diag = @import("diag.zig");
-pub const sp = @import("string-pool.zig");
+pub const sp = @import("interner.zig");
 pub const ezio = @import("ezio.zig");
 pub const ast = @import("ast.zig");
 pub const lexer = @import("lexer.zig");
 pub const parser = @import("parser.zig");
 pub const sema = @import("sema.zig");
 pub const backends = @import("backends.zig");
-pub const llvm_bindings = @import("llvm");
+pub const types = @import("types.zig");
+pub const state = @import("state.zig");
 
 const Lexer = lexer.Lexer;
 const Parser = parser.Parser;
@@ -34,23 +35,25 @@ pub fn main(init: std.process.Init) !void {
 
     defer init.gpa.free(bytes);
 
-    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    var arena: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
     defer arena.deinit();
 
     const alloc = arena.allocator();
 
-    const source = try diag.Source.init(alloc, cfg.ifile, bytes);
+    state.source_files = .empty;
+    state.diagnostics = .init(init.gpa);
+    const source_id = try state.add_source_file(init.gpa, try state.Source.init(init.gpa, cfg.ifile, bytes));
 
     var the_lexer = Lexer.init(alloc);
-    const tokens = the_lexer.tokenize(&source) catch |err| switch (err) {
+    const tokens = the_lexer.tokenize(source_id) catch |err| switch (err) {
         error.Diagnostic => undefined,
         else => return err,
     };
 
-    try the_lexer.diagnostics.print_all();
-    if (the_lexer.diagnostics.errors > 0) die(
+    state.diagnostics.print_all();
+    if (state.diagnostics.errors > 0) die(
         "Could not compile program due to {d} errors",
-        .{the_lexer.diagnostics.errors},
+        .{state.diagnostics.errors},
     );
 
     // Uncomment this to print all tokens
@@ -58,31 +61,32 @@ pub fn main(init: std.process.Init) !void {
     //     ezio.println("{f}", .{tok});
     // }
 
-    var string_pool = sp.StringPool.init(alloc);
+    var string_pool: sp.StringPool = .init(alloc);
     var the_parser = Parser.init(alloc, &string_pool);
-    const program = the_parser.parse_program(tokens, &source) catch |err| switch (err) {
-        error.Diagnostic => undefined,
+    const program = the_parser.parse_program(tokens) catch |err| switch (err) {
+        error.Fatal => undefined,
         else => return err,
     };
 
-    try the_parser.diagnostics.print_all();
-    if (the_parser.diagnostics.errors > 0) die(
+    state.diagnostics.print_all();
+    if (state.diagnostics.errors > 0) die(
         "Could not compile program due to {d} errors",
-        .{the_parser.diagnostics.errors},
+        .{state.diagnostics.errors},
     );
 
-    var the_sema = try Sema.init(alloc);
-    the_sema.sema_program(program, &source) catch |err| switch (err) {
-        error.Diagnostic => {},
+    var the_sema = try Sema.init(alloc, &string_pool);
+    the_sema.sema_program(program) catch |err| switch (err) {
+        error.Fatal => {},
         else => return err,
     };
 
-    try the_sema.diagnostics.print_all();
-    if (the_sema.diagnostics.errors > 0) die(
+    state.diagnostics.print_all();
+    if (state.diagnostics.errors > 0) die(
         "Could not compile program due to {d} errors",
-        .{the_sema.diagnostics.errors},
+        .{state.diagnostics.errors},
     );
 
+    if (true) die("TODO: Codegen", .{});
     var codegen = try backends.llvm.Codegen.init(alloc, the_sema.symbol_table, cfg.ifile);
     const llvm_module_ir = try codegen.gen_program(program);
     // const llvm_module_ir = "TODO";
@@ -104,6 +108,10 @@ pub fn main(init: std.process.Init) !void {
 
             // try cwd.deleteFile(init.io, "tmp.ll");
         },
+    }
+
+    if (state.diagnostics.warnings > 0) {
+        std.log.warn("Generated {d} warnings\n", .{state.diagnostics.warnings});
     }
 }
 

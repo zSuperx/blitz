@@ -3,31 +3,34 @@ const lexer = @import("lexer.zig");
 const token = @import("tokens.zig");
 const ezio = @import("ezio.zig");
 const diag = @import("diag.zig");
-const sp = @import("string-pool.zig");
+const interner = @import("interner.zig");
+const state = @import("state.zig");
 
 const ast = @import("ast.zig");
 
 const Token = token.Token;
 const TokenKind = token.TokenKind;
 
+const String = interner.String;
+const StringPool = interner.StringPool;
+
 pub const ParseError = error{
     OutOfMemory,
     Overflow,
     InvalidCharacter,
-    Diagnostic,
+    Fatal,
     WriteFailed,
 };
 
 pub const Parser = struct {
-    string_pool: *sp.StringPool,
+    string_pool: *StringPool,
     tokens: []const Token = undefined,
-    diagnostics: diag.DiagnosticList = undefined,
     cursor: usize = 0,
     allocator: std.mem.Allocator,
     last_span: diag.Span = .zeroed,
     last_token: ?Token = null,
 
-    pub fn init(allocator: std.mem.Allocator, string_pool: *sp.StringPool) Parser {
+    pub fn init(allocator: std.mem.Allocator, string_pool: *StringPool) Parser {
         return .{
             .string_pool = string_pool,
             .allocator = allocator,
@@ -38,10 +41,16 @@ pub const Parser = struct {
     // Helper functions
     //
 
+    inline fn createInit(self: *Parser, comptime T: type, v: T) !*T {
+        const p = try self.allocator.create(T);
+        p.* = v;
+        return p;
+    }
+
     // Emits an unexpected EOF diagnostic error
     fn report_unexpected_eof(self: *Parser) ParseError {
-        try self.diagnostics.emit_error(self.last_span, "Unexpected end of file", .{});
-        return ParseError.Diagnostic;
+        state.diagnostics.emit_error("Unexpected end of file {f}", .{self.last_span});
+        return ParseError.Fatal;
     }
 
     // TODO: much of these operator powers are inherited from my old compiler,
@@ -99,6 +108,7 @@ pub const Parser = struct {
 
     /// Returns and consumes next token if it matches one of `kinds`, else errors.
     fn expect_one_of(self: *Parser, kinds: []const std.meta.Tag(TokenKind)) !Token {
+        const span = self.last_span;
         const next = self.next_tok() orelse return self.report_unexpected_eof();
         for (kinds) |kind| {
             if (std.meta.activeTag(next.kind) == kind) {
@@ -112,18 +122,48 @@ pub const Parser = struct {
             if (i < kinds.len) try kinds_str.writer.writeAll(", ");
             if (i == kinds.len - 1 and i > 1) try kinds_str.writer.writeAll("or ");
         }
-        try self.diagnostics.emit_error(next.span, "Expected {s} but found `{s}`", .{ kinds_str.written(), next.raw });
-        return error.Diagnostic;
+        state.diagnostics.emit_error(
+            "Expected one of [{s}] after this, but found `{s}` {f}",
+            .{ kinds_str.written(), next.raw, span },
+        );
+        return error.Fatal;
     }
 
     /// Returns and consumes next token if it matches `kind`, else errors.
     fn expect_tok(self: *Parser, kind: std.meta.Tag(TokenKind)) !Token {
+        const span = self.last_span;
         const next = self.next_tok() orelse return self.report_unexpected_eof();
         if (std.meta.activeTag(next.kind) != kind) {
-            try self.diagnostics.emit_error(next.span, "Expected `{s}` but found `{s}`", .{ @tagName(kind), next.raw });
-            return error.Diagnostic;
+            state.diagnostics.emit_error(
+                "Expected `{s}` after this, but found `{s}` {f}",
+                .{
+                    @tagName(kind),
+                    next.raw,
+                    span,
+                },
+            );
+            return error.Fatal;
         }
         return next;
+    }
+
+    fn parse_var_decl(self: *Parser) !ast.VarDecl {
+        const declarator = try self.expect_one_of(&.{ .const_, .mut });
+
+        const variable = try self.parse_variable_reference();
+
+        var ty: ?*ast.TypeRef = null;
+        if (self.peek_tok_is(.colon)) {
+            _ = self.next_tok();
+            ty = try self.parse_type_reference();
+        }
+
+        return .{
+            .mutable = declarator.kind == .mut,
+            .variable = variable,
+            .span = declarator.span.merge(self.last_span),
+            .ty = ty,
+        };
     }
 
     //
@@ -145,7 +185,7 @@ pub const Parser = struct {
 
         var else_: ?*ast.Expr = null;
         if (self.peek_tok_is(.else_)) {
-            _ = try self.expect_tok(.else_);
+            _ = self.next_tok();
             else_ = try self.parse_expr();
         }
 
@@ -159,45 +199,41 @@ pub const Parser = struct {
     // x++, ++x, x++6, ++6 x
     fn parse_prefix_expr(self: *Parser) !*ast.Expr {
         const tok = self.peek_tok() orelse return self.report_unexpected_eof();
-        const p = try self.allocator.create(ast.Expr);
+        var kind: ast.ExprKind = undefined;
         switch (tok.kind) {
             .return_ => {
-                p.kind = .{ .return_ = try self.parse_return_expr() };
+                kind = .{ .return_ = try self.parse_return_expr() };
             },
             .number => |digits| {
                 _ = self.next_tok();
-                p.kind = .{
+                kind = .{
                     .number = try std.fmt.parseInt(u128, digits.items, 10),
                 };
             },
             .if_ => {
-                p.kind = .{
+                kind = .{
                     .ifelse = try self.parse_if_else_expr(),
                 };
             },
             .ident => {
-                _ = self.next_tok();
-                p.kind = .{
-                    .variable = .{
-                        .ident = try self.string_pool.insert(tok.raw),
-                    },
+                kind = .{
+                    .variable = try self.parse_variable_reference(),
                 };
             },
             .lparen => {
                 _ = self.next_tok();
-                self.allocator.destroy(p);
                 const inner = try self.parse_expr();
                 _ = try self.expect_tok(.rparen);
                 return inner;
             },
             .lcurly => {
-                p.kind = .{
+                kind = .{
                     .block = try self.parse_block_expr(),
                 };
             },
             .minus => {
                 _ = self.next_tok();
-                p.kind = .{
+                kind = .{
                     .unary = .{
                         .op = .negate,
                         .inner = try self.parse_expr(),
@@ -206,7 +242,7 @@ pub const Parser = struct {
             },
             .bang => {
                 _ = self.next_tok();
-                p.kind = .{
+                kind = .{
                     .unary = .{
                         .op = .not,
                         .inner = try self.parse_expr(),
@@ -218,16 +254,20 @@ pub const Parser = struct {
                 @panic("TODO: implement dereference");
             },
             else => {
-                try self.diagnostics.emit_error(tok.span, "Expected start of expression but found `{s}`", .{tok.raw});
-                return error.Diagnostic;
+                state.diagnostics.emit_error("Expected start of expression but found `{s}` {f}", .{ tok.raw, tok.span });
+                return error.Fatal;
             },
         }
-        p.span = tok.span.merge(self.last_span);
+        const p = try self.createInit(ast.Expr, .{
+            .kind = kind,
+            .span = tok.span.merge(self.last_span),
+            .ty = null,
+        });
         return p;
     }
 
     fn parse_infix_expr(self: *Parser, lhs: *ast.Expr, op: Token, op_power: usize) ParseError!*ast.Expr {
-        const p = try self.allocator.create(ast.Expr);
+        var kind: ast.ExprKind = undefined;
         switch (op.kind) {
             .plus, .minus, .star, .fslash, .percent => {
                 const binop: ast.BinOp = switch (op.kind) {
@@ -239,7 +279,7 @@ pub const Parser = struct {
                     else => unreachable,
                 };
 
-                p.kind = .{
+                kind = .{
                     .binary = .{
                         .op = binop,
                         .left = lhs,
@@ -254,7 +294,7 @@ pub const Parser = struct {
                     else => unreachable,
                 };
 
-                p.kind = .{
+                kind = .{
                     .logic = .{
                         .op = logicop,
                         .left = lhs,
@@ -271,7 +311,7 @@ pub const Parser = struct {
                     else => unreachable,
                 };
 
-                p.kind = .{
+                kind = .{
                     .cmp = .{
                         .op = cmpop,
                         .left = lhs,
@@ -288,7 +328,7 @@ pub const Parser = struct {
                     try args.append(self.allocator, arg);
                 }
                 _ = try self.expect_tok(.rparen);
-                p.kind = .{
+                kind = .{
                     .call = .{
                         .callee = lhs,
                         .args = args.items,
@@ -296,12 +336,15 @@ pub const Parser = struct {
                 };
             },
             else => {
-                try self.diagnostics.emit_error(op.span, "Expected infix operator but got `{s}`", .{op.raw});
-                return error.Diagnostic;
+                state.diagnostics.emit_error("Expected infix operator but got `{s}` {f}", .{ op.raw, op.span });
+                return error.Fatal;
             },
         }
-        p.span = lhs.span.merge(self.last_span);
-        return p;
+        return try self.createInit(ast.Expr, .{
+            .kind = kind,
+            .ty = null,
+            .span = lhs.span.merge(self.last_span),
+        });
     }
 
     fn parse_expr_1(self: *Parser, min_power: usize) !*ast.Expr {
@@ -360,10 +403,10 @@ pub const Parser = struct {
 
     fn parse_stmt(self: *Parser) ParseError!*ast.Stmt {
         const peek = self.peek_tok() orelse return self.report_unexpected_eof();
-        const p = try self.allocator.create(ast.Stmt);
+        var kind: @FieldType(ast.Stmt, "kind") = undefined;
         switch (peek.kind) {
             .const_, .mut => {
-                p.kind = .{ .decl = try self.parse_decl_stmt() };
+                kind = .{ .decl = try self.parse_decl_stmt() };
             },
             else => {
                 const expr = try self.parse_expr_1(get_op_power(.eq).?.left + 1);
@@ -376,14 +419,14 @@ pub const Parser = struct {
                     .star_eq    => .assign_mul,
                     .fslash_eq  => .assign_div,
                     .percent_eq => .assign_mod,
-                    else        => null,
+                    else        =>  null,
                     // zig fmt: on
                 } else null;
 
                 if (assign_op) |op| {
                     _ = self.next_tok();
                     const right = try self.parse_expr();
-                    p.kind = .{
+                    kind = .{
                         .assign = .{
                             .op = op,
                             .left = expr,
@@ -391,33 +434,30 @@ pub const Parser = struct {
                         },
                     };
                 } else {
-                    p.kind = .{ .expr = expr };
+                    kind = .{ .expr = expr };
                 }
             },
         }
-        p.span = peek.span.merge(self.last_span);
-        return p;
+
+        return try self.createInit(ast.Stmt, .{
+            .kind = kind,
+            .span = peek.span.merge(self.last_span),
+        });
     }
 
     fn parse_decl_stmt(self: *Parser) !ast.DeclStmt {
-        const declarator = try self.expect_one_of(&.{ .const_, .mut });
-
-        const ident = try self.expect_tok(.ident);
-        const variable = ident.raw;
+        const spec = try self.parse_var_decl();
 
         var expr: ?*ast.Expr = null;
         if (self.peek_tok_is(.eq)) {
-            _ = try self.expect_tok(.eq);
+            _ = self.next_tok();
 
             expr = try self.parse_expr();
         }
 
         return .{
-            .variable = ast.Variable{
-                .ident = try self.string_pool.insert(variable),
-            },
+            .decl = spec,
             .init = expr,
-            .mutable = std.meta.activeTag(declarator.kind) == .mut,
         };
     }
 
@@ -427,46 +467,112 @@ pub const Parser = struct {
         return .{ .value = value };
     }
 
+    fn parse_variable_reference(self: *Parser) !ast.VarRef {
+        const name = try self.expect_tok(.ident);
+        return .{
+            .text = try self.string_pool.add(name.raw),
+            .span = name.span,
+        };
+    }
+
     //
     // Top level parsers
     //
 
-    fn parse_function(self: *Parser) !*ast.Function {
-        const fn_ = try self.expect_tok(.fn_);
-
-        const fn_name = try self.expect_tok(.ident);
-        const fn_id = try self.string_pool.insert(fn_name.raw);
-
-        var arguments = std.ArrayList(ast.Variable).empty;
-        // parse argument names
-        _ = try self.expect_tok(.lparen);
-        while (!self.peek_tok_is(.rparen)) {
-            const arg_name = try self.expect_tok(.ident);
-            const arg_id = try self.string_pool.insert(arg_name.raw);
-            try arguments.append(self.allocator, .{ .ident = arg_id });
-            if (!self.peek_tok_is(.rparen)) _ = try self.expect_tok(.comma);
+    fn parse_type_reference(self: *Parser) !*ast.TypeRef {
+        const start = self.peek_tok() orelse return self.report_unexpected_eof();
+        var kind: @FieldType(ast.TypeRef, "kind") = undefined;
+        var span: diag.Span = undefined;
+        if (start.kind == .star) {
+            _ = self.next_tok();
+            const inner = try self.parse_type_reference();
+            kind = .{ .pointer = inner };
+            span = start.span.merge(inner.span);
+        } else {
+            const name = try self.parse_variable_reference();
+            kind = .{ .base = name };
+            span = start.span.merge(self.last_span);
         }
-        const rparen = try self.expect_tok(.rparen);
-
-        const body = try self.parse_block_expr();
-        const expr = try self.allocator.create(ast.Expr);
-        expr.* = .{
-            .kind = .{ .block = body },
-            .span = fn_.span.merge(rparen.span),
-        };
-
-        const p = try self.allocator.create(ast.Function);
-        p.* = .{
-            .name = .{ .ident = fn_id },
-            .arguments = arguments.items,
-            .body = expr,
-            .span = fn_.span.merge(expr.span),
-        };
-        return p;
+        return try self.createInit(ast.TypeRef, .{
+            .kind = kind,
+            .span = span,
+        });
     }
 
-    pub fn parse_program(self: *Parser, tokens: []const Token, source: *const diag.Source) !*ast.Program {
-        self.diagnostics = .init(self.allocator, source);
+    fn parse_argument(self: *Parser) !ast.VarDecl {
+        if (self.peek_tok_is(.ident)) {
+            const start = self.peek_tok().?.span;
+            const variable = try self.parse_variable_reference();
+
+            _ = self.expect_tok(.colon) catch {
+                state.diagnostics.emit_error(
+                    "Function arguments must have a known type {f}",
+                    .{start},
+                );
+            };
+            const ty = try self.parse_type_reference();
+
+            return .{
+                .ty = ty,
+                .mutable = false,
+                .variable = variable,
+                .span = start.merge(self.last_span),
+            };
+        } else {
+            const decl = try self.parse_var_decl();
+            if (decl.ty == null) {
+                state.diagnostics.emit_error(
+                    "Function arguments must have a known type {f}",
+                    .{decl.span},
+                );
+            }
+            return decl;
+        }
+    }
+
+    fn parse_function(self: *Parser) !*ast.Function {
+        const start = try self.expect_tok(.fn_);
+
+        const fn_name = try self.parse_variable_reference();
+
+        // start parse args
+        var arguments = std.ArrayList(ast.VarDecl).empty;
+        _ = try self.expect_tok(.lparen);
+
+        while (!self.peek_tok_is(.rparen)) {
+            const arg = try self.parse_argument();
+            try arguments.append(self.allocator, arg);
+            if (!self.peek_tok_is(.rparen)) _ = try self.expect_tok(.comma);
+        }
+
+        const rparen = try self.expect_tok(.rparen);
+        // end parse args
+
+        // start parse return
+        const return_type = if (self.peek_tok_is(.colon)) b: {
+            _ = try self.expect_tok(.colon);
+            break :b try self.parse_type_reference();
+        } else null;
+        // end parse return
+
+        const body = try self.parse_block_expr();
+        const expr = try self.createInit(ast.Expr, .{
+            .kind = .{ .block = body },
+            .span = start.span.merge(rparen.span),
+            .ty = null,
+        });
+
+        return try self.createInit(ast.Function, .{
+            .name = fn_name,
+            .arguments = arguments.items,
+            .return_type = return_type,
+            .body = expr,
+            .span = start.span.merge(expr.span),
+        });
+    }
+
+    pub fn parse_program(self: *Parser, tokens: []const Token) !*ast.Program {
+        state.diagnostics = .init(self.allocator);
         self.tokens = tokens;
         self.cursor = 0;
 
@@ -477,12 +583,10 @@ pub const Parser = struct {
             try functions.append(self.allocator, function);
         }
 
-        if (self.diagnostics.list.items.len > 0) return error.Diagnostic;
+        if (state.diagnostics.list.items.len > 0) return error.Fatal;
 
-        const p = try self.allocator.create(ast.Program);
-        p.* = .{
+        return try self.createInit(ast.Program, .{
             .functions = functions.items,
-        };
-        return p;
+        });
     }
 };

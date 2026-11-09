@@ -34,6 +34,7 @@ const CodegenError = error{
 pub const Codegen = struct {
     allocator: std.mem.Allocator,
     symbol_table: std.AutoHashMap(Symbol, LLVMSymbolInfo),
+    values: std.AutoHashMap(ast.VarRef, LLVMSymbolInfo),
 
     // LLVM stuff
     context: LLVMContextRef,
@@ -54,12 +55,16 @@ pub const Codegen = struct {
         // Build LLVM-specific symbol table
         var llvm_symbol_table = std.AutoHashMap(Symbol, LLVMSymbolInfo).init(allocator);
         var iterator = symbol_table.iterator();
+
+        const values = std.AutoHashMap(ast.VarRef, LLVMSymbolInfo).init(allocator);
+
         while (iterator.next()) |entry| {
             try llvm_symbol_table.put(entry.key_ptr.*, .{ .base = entry.value_ptr.* });
         }
 
         return .{
             .allocator = allocator,
+            .values = values,
             .symbol_table = llvm_symbol_table,
             .context = core.LLVMContextCreate().?,
             .module = core.LLVMModuleCreateWithName(@ptrCast(name)).?,
@@ -328,9 +333,9 @@ pub const Codegen = struct {
     fn gen_decl_stmt(self: *Codegen, stmt: *ast.Stmt) !void {
         const decl = &stmt.kind.decl;
 
-        const name = try std.fmt.allocPrintSentinel(self.allocator, "{f}", .{decl.variable}, 0);
+        const name = try std.fmt.allocPrintSentinel(self.allocator, "{f}", .{decl.decl.variable}, 0);
         const ptr_value = core.LLVMBuildAlloca(self.builder, llvm_i64, name);
-        self.symbol_table.getEntry(decl.variable.symbol.?).?.value_ptr.value = ptr_value;
+        self.symbol_table.getEntry(decl.decl.variable.symbol.?).?.value_ptr.value = ptr_value;
 
         if (decl.init) |init_expr| {
             const init_value = try self.gen_expr_rvalue(init_expr);
@@ -353,13 +358,13 @@ pub const Codegen = struct {
         // Add value bindings for each argument
         for (function.arguments, 0..) |arg, i| {
             // Move each argument onto the stack and use the alloca pointer as the symbol'sLLVMValueRef.
-            const arg_name = try std.fmt.allocPrintSentinel(self.allocator, "{f}", .{arg}, 0);
+            const arg_name = try std.fmt.allocPrintSentinel(self.allocator, "{f}", .{arg.variable}, 0);
             const arg_ptr = core.LLVMBuildAlloca(self.builder, llvm_i64, arg_name).?;
             const arg_value = core.LLVMGetParam(function_value, @intCast(i)).?;
 
             _ = core.LLVMBuildStore(self.builder, arg_value, arg_ptr);
 
-            self.symbol_table.getEntry(arg.symbol.?).?.value_ptr.value = arg_ptr;
+            self.symbol_table.getPtr(arg.variable.symbol.?).?.value = arg_ptr;
         }
 
         const tail = try self.gen_expr_rvalue(function.body);
@@ -377,14 +382,14 @@ pub const Codegen = struct {
             }
             const function_type = core.LLVMFunctionType(llvm_i64, @ptrCast(arg_types.items), @intCast(arg_types.items.len), 0);
 
-            const function_name = if (std.mem.eql(u8, function.name.ident.lookup(), "main"))
+            const function_name = if (std.mem.eql(u8, function.name.text.lookup(), "main"))
                 "main"
             else
                 try std.fmt.allocPrintSentinel(self.allocator, "{f}", .{function.name}, 0);
 
             // Create the function and update the LLVM symbol table
             const function_value = core.LLVMAddFunction(self.module, function_name, function_type);
-            self.symbol_table.getEntry(function.name.symbol.?).?.value_ptr.value = function_value;
+            self.symbol_table.getPtr(function.name.symbol.?).?.value = function_value;
         }
 
         for (program.functions) |function| {

@@ -1,0 +1,3 @@
+fn main(argc) {
+    const x = if (argc > 1) 42 else 69;
+}

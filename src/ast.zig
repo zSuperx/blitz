@@ -1,36 +1,59 @@
 const std = @import("std");
 const diag = @import("diag.zig");
-const StringId = @import("string-pool.zig").StringId;
-const Symbol = @import("sema.zig").Symbol;
+const interner = @import("interner.zig");
+const sema = @import("sema.zig");
+const types = @import("types.zig");
+const Type = types.Type;
+
+// Interned items
+const String = interner.String;
+const ConcreteTypeId = interner.ConcreteTypeId;
+
+const Symbol = sema.Symbol;
 
 // ====================================================
 // Top level AST nodes
 
 pub const Program = struct {
     functions: []const *Function,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        for (self.functions) |function| {
-            try writer.print("{f}\n", .{function});
-        }
-    }
 };
 
 pub const Function = struct {
-    name: Variable,
-    arguments: []Variable,
+    name: VarRef,
+    arguments: []VarDecl,
+    return_type: ?*TypeRef,
     body: *Expr,
     span: diag.Span,
+};
 
-    pub fn format(self: Function, writer: *std.Io.Writer) !void {
-        try writer.print("{s}(", .{self.name});
-        for (self.arguments) |arg| {
-            try writer.print("{f},", .{arg});
-        }
-        try writer.print("): {f}", .{self.body});
+// ====================================================
+// Meta
+
+pub const TypeRef = struct {
+    span: diag.Span,
+    kind: union(enum) {
+        pointer: *TypeRef,
+        base: VarRef,
+    },
+};
+
+pub const VarDecl = struct {
+    span: diag.Span,
+    variable: VarRef,
+    mutable: bool,
+    ty: ?*TypeRef,
+};
+
+pub const VarRef = struct {
+    text: String,
+    symbol: Symbol = .invalid,
+    span: diag.Span,
+
+    pub fn format(
+        self: VarRef,
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("{f}.{f}", .{ self.text, self.symbol });
     }
 };
 
@@ -51,18 +74,6 @@ pub const Stmt = struct {
             else => return null,
         }
     }
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        switch (self.kind) {
-            .decl => |stmt| try writer.print("{f}", .{stmt}),
-            .block => |stmt| try writer.print("{f}", .{stmt}),
-            .expr => |stmt| try writer.print("{f}", .{stmt}),
-            .return_ => |stmt| try writer.print("{f}", .{stmt}),
-        }
-    }
 };
 
 pub const AssignStmt = struct {
@@ -72,21 +83,8 @@ pub const AssignStmt = struct {
 };
 
 pub const DeclStmt = struct {
-    variable: Variable,
+    decl: VarDecl,
     init: ?*Expr,
-    mutable: bool,
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("let {f} = ", .{self.variable});
-        if (self.init) |init| {
-            try writer.print("{f}", .{init});
-        } else {
-            try writer.print("?", .{});
-        }
-    }
 };
 
 pub const IfStmt = struct {
@@ -101,41 +99,38 @@ pub const ExprStmt = *Expr;
 // Expressions
 
 pub const Expr = struct {
-    kind: union(enum) {
-        number: u128,
-        variable: Variable,
-        binary: BinExpr,
-        cmp: CmpExpr,
-        logic: LogicExpr,
-        unary: UnExpr,
-        call: CallExpr,
-        block: BlockExpr,
-        ifelse: IfElseExpr,
-        return_: ReturnExpr,
-    },
+    kind: ExprKind,
     span: diag.Span,
+    ty: ?Type,
     is_stmt: bool = false,
-    is_tail: bool = false,
+    is_block_tail: bool = false,
 
-    pub fn as_if_else(self: *Expr) ?*IfElseExpr {
+    pub fn collect_tail_exprs(self: *const Expr, gpa: std.mem.Allocator, tails: *std.ArrayList(*const Expr)) !void {
         switch (self.kind) {
-            .ifelse => |*ifelse| return ifelse,
-            else => return null,
+            // These expressions evaluate to their children
+            .block => |expr| {
+                if (expr.tail) |tail| {
+                    try tail.collect_tail_exprs(gpa, tails);
+                } else if (expr.fake_tail()) |tail| {
+                    if (tail.kind == .return_)
+                        try tail.collect_tail_exprs(gpa, tails);
+                }
+            },
+            .ifelse => |expr| {
+                try expr.then.collect_tail_exprs(gpa, tails);
+                if (expr.else_) |else_|
+                    try else_.collect_tail_exprs(gpa, tails);
+            },
+
+            // All other expressions produce a new value
+            else => {
+                try tails.append(gpa, self);
+            },
         }
     }
 
-    pub fn as_block(self: *Expr) ?*BlockExpr {
-        switch (self.kind) {
-            .block => |*block| return block,
-            else => return null,
-        }
-    }
-
-    pub fn as_variable(self: *Expr) ?Symbol {
-        switch (self.kind) {
-            .variable => |variable| return variable.symbol,
-            else => return null,
-        }
+    pub fn as(self: *Expr, comptime tag: std.meta.Tag(ExprKind)) ?*@FieldType(ExprKind, @tagName(tag)) {
+        return if (self.kind == tag) &@field(self.kind, @tagName(tag)) else null;
     }
 
     pub fn is_lvalue(self: *Expr) bool {
@@ -146,21 +141,40 @@ pub const Expr = struct {
     }
 };
 
-pub const ReturnExpr = struct {
-    value: *Expr,
+pub const ExprKind = union(enum) {
+    number: u128,
+    variable: VarRef,
+    binary: BinExpr,
+    cmp: CmpExpr,
+    logic: LogicExpr,
+    unary: UnExpr,
+    call: CallExpr,
+    return_: ReturnExpr,
 
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("return ({f})", .{self.value});
-    }
+    // These expressions evaluate to their children
+    block: BlockExpr,
+    ifelse: IfElseExpr,
 };
 
+pub const ReturnExpr = struct {
+    value: *Expr,
+};
 
 pub const BlockExpr = struct {
     stmts: []const *Stmt,
     tail: ?*Expr,
+
+    pub fn fake_tail(self: *const BlockExpr) ?*Expr {
+        if (self.tail) |_| return null;
+        if (self.stmts.len == 0) return null;
+        const last = self.stmts[self.stmts.len - 1];
+        if (last.as_expr()) |expr| {
+            if (expr.as(.return_)) |_| return expr;
+            return null;
+        } else {
+            return null;
+        }
+    }
 };
 
 pub const IfElseExpr = struct {
@@ -192,22 +206,6 @@ pub const UnExpr = struct {
     inner: *Expr,
 };
 
-pub const Variable = struct {
-    ident: StringId,
-    symbol: ?Symbol = null,
-
-    pub fn format(
-        self: Variable,
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        if (self.symbol) |symbol| {
-            try writer.print("{s}_{any}", .{ self.ident.lookup(), symbol.id });
-        } else {
-            try writer.print("{s}", .{self.ident.lookup()});
-        }
-    }
-};
-
 pub const CallExpr = struct {
     callee: *Expr,
     args: []*Expr,
@@ -228,6 +226,17 @@ pub const AssignOp = enum {
 pub const LogicOp = enum {
     eq,
     ne,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        const s = switch (self) {
+            .eq => "==",
+            .ne => "!="
+        };
+        try writer.writeAll(s);
+    }
 };
 
 pub const CmpOp = enum {
@@ -235,6 +244,19 @@ pub const CmpOp = enum {
     gt,
     le,
     ge,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        const s = switch (self) {
+            .lt => "<=",
+            .gt => ">=",
+            .le => "<=",
+            .ge => ">=",
+        };
+        try writer.writeAll(s);
+    }
 };
 
 pub const BinOp = enum {
@@ -243,6 +265,20 @@ pub const BinOp = enum {
     mul,
     div,
     mod,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        const s = switch (self) {
+            .add => "+",
+            .sub => "-",
+            .mul => "*",
+            .div => "/",
+            .mod => "%",
+        };
+        try writer.writeAll(s);
+    }
 };
 
 pub const UnOp = enum {
