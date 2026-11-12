@@ -1,8 +1,8 @@
 const std = @import("std");
 const ast = @import("ast.zig");
-const sema = @import("sema.zig");
 const diag = @import("diag.zig");
 const state = @import("state.zig");
+const Sema = @import("Sema.zig");
 
 // ====================================================
 // Types
@@ -32,9 +32,9 @@ pub const builtins = struct {
         handle: *Type,
     };
 
-    pub fn init(s: *sema.Sema) !void {
+    pub fn init(s: *Sema) !void {
         // Register this first if other builtin types need it.
-        type_ = try s.tsys.add_concrete(.type);
+        type_ = try s.tsys.createConcreteType(.type);
 
         const specs = [_]Spec{
             .{ .concrete = .bool, .text = "bool", .handle = &bool_ },
@@ -114,6 +114,22 @@ pub const builtins = struct {
     }
 };
 
+/// The ID of a type. This is small data and can be easily stored and copied
+/// anywhere.
+pub const Type = enum(usize) {
+    _,
+
+    /// Returns the backing integer.
+    fn as_index(self: Type) usize {
+        return @intFromEnum(self);
+    }
+
+    /// Creates a `Type` from a usize
+    fn from_index(i: usize) Type {
+        return @enumFromInt(i);
+    }
+};
+
 /// A concrete type
 pub const CTy = union(enum) {
     void,
@@ -143,33 +159,6 @@ pub const CTy = union(enum) {
     };
 };
 
-/// The ID of a type
-pub const Type = enum(usize) {
-    _,
-
-    fn as_index(self: Type) usize {
-        return @intFromEnum(self);
-    }
-
-    fn from_index(i: usize) Type {
-        return @enumFromInt(i);
-    }
-};
-
-pub const Constraint = union(enum) {
-    equal: []const Type,
-    numeric: Type,
-    pointer: Type,
-    binary: BinOpConstraint,
-
-    pub const BinOpConstraint = struct {
-        op: ast.BinOp,
-        lhs: Type,
-        rhs: Type,
-        out: Type,
-    };
-};
-
 /// An unknown type
 pub const UTy = struct {
     parent: Type,
@@ -179,11 +168,43 @@ pub const UTy = struct {
 
     pub const Property = enum(u8) {
         numeric,
-        pointer,
+        signed,
     };
 };
 
-/// DSU information for a type
+pub const Constraint = union(enum) {
+    equal: []const Type,
+    numeric: Type,
+    pointer: PointerConstraint,
+    binary: BinaryConstraint,
+    unary: UnaryConstraint,
+
+    pub const PointerConstraint = struct {
+        pointer: Type,
+        points_to: Type,
+    };
+
+    pub const LogicalConstraint = struct {
+        op: ast.LogicOp,
+        lhs: Type,
+        rhs: Type,
+    };
+
+    pub const UnaryConstraint = struct {
+        op: ast.UnOp,
+        in: Type,
+        out: Type,
+    };
+
+    pub const BinaryConstraint = struct {
+        op: ast.BinOp,
+        lhs: Type,
+        rhs: Type,
+        out: Type,
+    };
+};
+
+/// A `Type`'s entry in the Disjoint Set Union data structure.
 pub const TypeEntry = struct {
     id: Type,
     kind: union(enum) {
@@ -237,15 +258,17 @@ pub const TypeSystem = struct {
         };
     }
 
-    pub fn get_entry(self: *TypeSystem, id: Type) *TypeEntry {
+    fn getTypeEntry(self: *TypeSystem, id: Type) *TypeEntry {
         return &self.types.items[id.as_index()];
     }
 
-    pub fn get_concrete(
+    /// Looks up `ty` in the type system and returns a `CTy` if the type
+    /// resolves to a concrete type.
+    pub fn getConcreteType(
         self: *TypeSystem,
         ty: Type,
     ) ?CTy {
-        const entry = self.get_entry(self.find_parent(ty));
+        const entry = self.getTypeEntry(self.findParentType(ty));
         switch (entry.kind) {
             .unknown => return null,
             .concrete => |c| {
@@ -254,108 +277,34 @@ pub const TypeSystem = struct {
         }
     }
 
-    fn downcastCT(
-        self: *TypeSystem,
-        ty: Type,
-        comptime tag: std.meta.Tag(CTy),
-    ) ?@FieldType(CTy, @tagName(tag)) {
-        const entry = self.get_entry(self.find_parent(ty));
-        switch (entry.kind) {
-            .unknown => return null,
-            .concrete => |c| {
-                if (c != tag) return null;
-                return @field(c, @tagName(tag));
-            },
-        }
-    }
-
-    pub fn add_concrete(self: *TypeSystem, ct: CTy) !Type {
-        const entry = try self.concrete_map.getOrPut(ct);
+    /// Creates and potentially inserts a concrete type in the type system. If
+    /// a type already exists, nothing is added. The `Type` index is returned,
+    /// which can be used to retrieve the inserted `CTy`.
+    pub fn createConcreteType(self: *TypeSystem, ct: CTy) !Type {
+        const entry = self.concrete_map.getOrPut(ct) catch @panic("OOM");
         if (entry.found_existing) {
             return entry.value_ptr.*;
         }
 
         const id: Type = .from_index(self.types.items.len);
-        try self.types.append(self.allocator, .{
+        self.types.append(self.allocator, .{
             .id = id,
             .kind = .{ .concrete = ct },
-        });
+        }) catch @panic("OOM");
 
         entry.value_ptr.* = id;
 
         return id;
     }
 
-    pub fn create_constraint(self: *TypeSystem, cst: Constraint) !usize {
-        const id = self.constraints.items.len;
-        try self.constraints.append(self.allocator, cst);
-        return id;
-    }
-
-    pub fn solve_constraints(self: *TypeSystem) !void {
-        var changed = true;
-
-        while (changed) {
-            changed = false;
-            for (self.types.items) |ty| {
-                _ = self.find_parent(ty.id);
-            }
-
-            for (self.constraints.items) |cst| {
-                changed |= try self.solve_constraint(cst);
-            }
-        }
-    }
-
-    fn satisfiesNumeric(self: *TypeSystem, ty: Type) enum { yes, no, idk } {
-        switch (self.get_entry(ty).kind) {
-            .unknown => |ut| {
-                return if (ut.properties.contains(.numeric)) .yes else .idk;
-            },
-            .concrete => |ct| return if (ct == .int) .yes else .no,
-        }
-    }
-
-    fn satisfiesPointer(self: *TypeSystem, ty: Type) enum { yes, no, idk } {
-        switch (self.get_entry(ty).kind) {
-            .unknown => return .idk,
-            .concrete => |ct| return if (ct == .pointer) .yes else .no,
-        }
-    }
-
-    fn solve_constraint(self: *TypeSystem, cst: Constraint) !bool {
-        switch (cst.kind) {
-            .binary => |b| {
-                return self.solve_binary_constraint(b);
-            },
-            .numeric => {},
-            .pointer => {},
-        }
-        return false;
-    }
-
-    fn solve_binary_constraint(self: *TypeSystem, cst: Constraint.BinOpConstraint) !bool {
-        var changed = false;
-        changed = changed;
-        switch (cst.op) {
-            .add => {
-                if (self.satisfiesNumeric(cst.lhs) == .yes or
-                    self.satisfiesNumeric(cst.rhs) == .yes or
-                    self.satisfiesNumeric(cst.out) == .yes)
-                {
-                    changed |= try self.unify(cst.lhs, cst.rhs);
-                    changed |= try self.unify(cst.lhs, cst.out);
-                }
-            },
-            .sub => {}, // TODO
-            .mul => {},
-            .div => {},
-            .mod => {},
-        }
-        return changed;
-    }
-
-    pub fn add_unknown(self: *TypeSystem, properties: UTy.Properties) !Type {
+    /// Creates a new unknown type with the given initial properties imposed
+    /// upon it. As a `UTy` unifies with other unknown types, it collects
+    /// properties.
+    ///
+    /// At the end of the type inference phase, the type checker will attempt
+    /// to fit the `UTy` to any `CTy` it was unified with. If the `CTy` does
+    /// not satisfy all properties, a type checking error is thrown.
+    pub fn createUnknownType(self: *TypeSystem, properties: UTy.Properties) !Type {
         const id: Type = .from_index(self.types.items.len);
         try self.types.append(self.allocator, .{
             .id = id,
@@ -375,32 +324,139 @@ pub const TypeSystem = struct {
         return id;
     }
 
-    pub fn find_parent(self: *TypeSystem, ty: Type) Type {
-        const index = ty.as_index();
+    /// Returns whether a given `Type` satisfies the given property.
+    fn satisfiesProperty(self: *TypeSystem, ty: Type, property: UTy.Property) bool {
+        const parent = self.findParentType(ty);
+        const entry = self.getTypeEntry(parent);
+        switch (entry.kind) {
+            .concrete => |c| {
+                switch (property) {
+                    .numeric => return c == .int,
+                    .signed => return c == .int and c.int.signed,
+                }
+            },
+            .unknown => |u| return u.properties.contains(property),
+        }
+    }
 
-        switch (self.types.items[index].kind) {
-            .concrete => return ty,
+    /// Adds a property to a type. If the given type is a `CTy` that is known
+    /// not to fit that property, an error is thrown. (e.g. `CTy.bool` with
+    /// `UTy.Property.numeric` will result in an error)
+    pub fn addProperty(self: *TypeSystem, ty: Type, property: UTy.Property) !void {
+        const entry = self.getTypeEntry(ty);
+        switch (entry.kind) {
+            .concrete => {
+                if (!self.satisfiesProperty(ty, property)) {
+                    state.diagnostics.emitError("`{f}` does not satisfy the property: {s}", .{
+                        self.fmtType(ty),
+                        @tagName(property),
+                    });
+                    return error.Fatal;
+                }
+            },
             .unknown => |*u| {
-                if (u.parent == ty) return ty;
-                const grandparent = self.find_parent(u.parent);
-                // if (u.parent.index != grandparent.index)
-                //     std.debug.print(
-                //         "Compressing path {f} -> {f} -> {f} to {f} -> {f}\n",
-                //         .{
-                //             self.fmtType(ty),
-                //             self.fmtType(u.parent),
-                //             self.fmtType(grandparent),
-                //             self.fmtType(ty),
-                //             self.fmtType(grandparent),
-                //         },
-                //     );
-                u.parent = grandparent;
-                return u.parent;
+                u.properties.insert(property);
             },
         }
     }
 
-    fn unify_concrete_types(self: *TypeSystem, a: CTy, b: CTy) TypeError!bool {
+    /// Create a constraint and add it to the type system. A constraint
+    /// describes the relationships between types, and can result in type
+    /// unifications.
+    pub fn createConstraint(self: *TypeSystem, cst: Constraint) TypeError!void {
+        switch (cst) {
+            .equal => |c| {
+                const t0 = c[0];
+                for (c) |t| {
+                    _ = try self.unify(t0, t);
+                }
+            },
+            .numeric => |t| {
+                try self.addProperty(t, .numeric);
+            },
+            .unary => |c| {
+                switch (c.op) {
+                    .negate => {
+                        try self.addProperty(c.in, .numeric);
+                        try self.addProperty(c.in, .signed);
+                        try self.createConstraint(.{
+                            .equal = &.{
+                                c.in,
+                                c.out,
+                            },
+                        });
+                    },
+                    .not => {
+                        try self.createConstraint(.{
+                            .equal = &.{
+                                c.in,
+                                c.out,
+                                builtins.bool_,
+                            },
+                        });
+                    },
+                }
+            },
+            .binary => |c| {
+                try self.addProperty(c.out, .numeric);
+
+                try self.createConstraint(.{
+                    .equal = &.{
+                        c.lhs,
+                        c.rhs,
+                        c.out,
+                    },
+                });
+            },
+            .pointer => |c| {
+                const ptr = try self.createConcreteType(.{
+                    .pointer = .{ .points_to = c.points_to },
+                });
+                _ = try self.unify(ptr, c.pointer);
+            },
+        }
+    }
+
+    pub fn solveTypes(self: *TypeSystem) !void {
+        for (0..self.types.items.len) |i| {
+            const this = Type.from_index(i);
+            const parent = self.findParentType(this);
+            if (parent != this) {
+                switch (self.getTypeEntry(parent).kind) {
+                    .unknown => |u| {
+                        if (u.properties.contains(.numeric)) {
+                            if (u.properties.contains(.signed)) {
+                                _ = try self.unify(parent, builtins.i32_);
+                            } else {
+                                _ = try self.unify(parent, builtins.u32_);
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    /// Finds a type's parent in the DSU array. A type's parent is the type it
+    /// resolves to. This function performs path compression.
+    fn findParentType(self: *TypeSystem, ty: Type) Type {
+        const entry = self.getTypeEntry(ty);
+        switch (entry.kind) {
+            .concrete => return ty,
+            .unknown => |u| {
+                if (u.parent == ty) return ty;
+                const grandparent = self.findParentType(u.parent);
+
+                entry.kind.unknown.parent = grandparent;
+                return entry.kind.unknown.parent;
+            },
+        }
+    }
+
+    /// Attempts to unify two concrete types. To be unified, they must either
+    /// be the same exact base type, or must unify all contained types.
+    fn unifyConcreteTypes(self: *TypeSystem, a: CTy, b: CTy) TypeError!bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) {
             return error.Fatal;
         }
@@ -432,40 +488,6 @@ pub const TypeSystem = struct {
         return changed;
     }
 
-    pub fn constrain(self: *TypeSystem, cst: Constraint) TypeError!void {
-        switch (cst) {
-            .equal => |c| {
-                const t0 = c[0];
-                for (c) |t| {
-                    _ = try self.unify(t0, t);
-                }
-            },
-            .numeric => |t| {
-                if (self.satisfiesNumeric(t) == .no) return error.Fatal;
-                const entry = self.get_entry(t);
-                if (entry.kind == .unknown) {
-                    entry.kind.unknown.properties.insert(.numeric);
-                }
-            },
-            .binary => |c| {
-                if (self.satisfiesNumeric(c.lhs) == .no or
-                    self.satisfiesNumeric(c.rhs) == .no or
-                    self.satisfiesNumeric(c.out) == .no) return error.Fatal;
-
-                try self.constrain(.{ .numeric = c.lhs });
-                try self.constrain(.{ .numeric = c.rhs });
-                try self.constrain(.{ .numeric = c.out });
-
-                try self.constrain(.{ .equal = &.{
-                    c.lhs,
-                    c.rhs,
-                    c.out,
-                } });
-            },
-            else => {},
-        }
-    }
-
     /// Returns whether unification changed something
     pub fn unify(self: *TypeSystem, a: ?Type, b: ?Type) TypeError!bool {
         if (a == null or b == null) return false;
@@ -479,60 +501,65 @@ pub const TypeSystem = struct {
         // After walking the AST and unifying expression types, we will attempt
         // to solve all constraints.
 
-        const setA = self.find_parent(a.?);
-        const setB = self.find_parent(b.?);
+        const setA = self.findParentType(a.?);
+        const setB = self.findParentType(b.?);
 
         if (setA == setB) return false;
 
-        const entryA = self.get_entry(setA);
-        const entryB = self.get_entry(setB);
-
-        // =================================
-        // CASE 1: Concrete & Concrete
+        const entryA = self.getTypeEntry(setA);
+        const entryB = self.getTypeEntry(setB);
 
         if (entryA.kind == .concrete and entryB.kind == .concrete) {
-            return self.unify_concrete_types(entryA.kind.concrete, entryB.kind.concrete);
-        }
+            // =================================
+            // CASE 1: Concrete & Concrete
 
-        // we will merge other into parent
-        var parent: Type = undefined;
-        var other: Type = undefined;
+            return self.unifyConcreteTypes(entryA.kind.concrete, entryB.kind.concrete);
+        } else if (entryA.kind == .unknown and entryB.kind == .unknown) {
+            // =================================
+            // CASE 2: Unknown & Unknown
 
-        // =================================
-        // CASE 2: Unknown & Unknown
-
-        if (entryA.kind == .unknown and entryB.kind == .unknown) {
             // canonicalize parent to be the larger set
-            parent = if (entryA.size > entryB.size) setA else setB;
-            other = if (entryA.size <= entryB.size) setA else setB;
+            const parent = if (entryA.size > entryB.size) setA else setB;
+            const other = if (entryA.size <= entryB.size) setA else setB;
 
-            const parentEntry = self.get_entry(parent);
-            const otherEntry = self.get_entry(other);
+            const parentEntry = self.getTypeEntry(parent);
+            const otherEntry = self.getTypeEntry(other);
 
             otherEntry.kind.unknown.parent = parent;
             parentEntry.size += otherEntry.size;
+            parentEntry.kind.unknown.properties.setUnion(otherEntry.kind.unknown.properties);
         } else {
             // =================================
             // CASE 3: Concrete & Unknown
 
+            var concrete: Type = undefined;
+            var unknown: Type = undefined;
+
             // canonicalize parent to be concrete
             if (entryA.kind == .concrete) {
-                parent = setA;
-                other = setB;
+                concrete = setA;
+                unknown = setB;
             } else if (entryB.kind == .concrete) {
-                parent = setB;
-                other = setA;
+                concrete = setB;
+                unknown = setA;
             }
 
-            // other is guaranteed to be unknown, parent can be either unknown or concrete
-            const parentEntry = self.get_entry(parent);
-            const otherEntry = self.get_entry(other);
+            const concreteEntry = self.getTypeEntry(concrete);
+            const unknownEntry = self.getTypeEntry(unknown);
 
-            otherEntry.kind.unknown.parent = parent;
-            parentEntry.size += otherEntry.size;
+            var properties = unknownEntry.kind.unknown.properties.iterator();
+            while (properties.next()) |prop| {
+                try self.addProperty(concrete, prop);
+            }
+
+            unknownEntry.kind.unknown.parent = concrete;
+            concreteEntry.size += unknownEntry.size;
         }
         return true;
     }
+
+    // ==============================
+    // PRINTING HELPER FUNCTIONS
 
     pub fn print(self: *TypeSystem) void {
         std.debug.print("TYPES:\n", .{});
@@ -546,9 +573,6 @@ pub const TypeSystem = struct {
         }
     }
 
-    // ==============================
-    // PRINTING HELPER FUNCTIONS
-
     const TyFmt = struct {
         ts: *TypeSystem,
         type: Type,
@@ -557,7 +581,7 @@ pub const TypeSystem = struct {
             self: TyFmt,
             writer: *std.Io.Writer,
         ) std.Io.Writer.Error!void {
-            const entry = self.ts.get_entry(self.type);
+            const entry = self.ts.getTypeEntry(self.type);
             switch (entry.kind) {
                 .concrete => |concrete| {
                     switch (concrete) {
@@ -586,7 +610,7 @@ pub const TypeSystem = struct {
                     }
                 },
                 .unknown => {
-                    const parent = self.ts.find_parent(entry.id);
+                    const parent = self.ts.findParentType(entry.id);
                     if (parent != entry.id) {
                         try writer.print("(?{d} -> {f})", .{ entry.id.as_index(), self.ts.fmtType(parent) });
                     } else {
@@ -611,10 +635,23 @@ pub const TypeSystem = struct {
         ) std.Io.Writer.Error!void {
             switch (self.cst) {
                 .numeric => |t| try writer.print("{f} must be numeric", .{self.ts.fmtType(t)}),
-                .pointer => |t| try writer.print("{f} must be a pointer", .{self.ts.fmtType(t)}),
+                .pointer => |t| try writer.print("{f} must point to {f}", .{
+                    self.ts.fmtType(t.pointer),
+                    self.ts.fmtType(t.points_to),
+                }),
+                .unary => |un| {
+                    try writer.print(
+                        "{f} {f} = {f}",
+                        .{
+                            un.op,
+                            self.ts.fmtType(un.in),
+                            self.ts.fmtType(un.out),
+                        },
+                    );
+                },
                 .binary => |bin| {
                     try writer.print(
-                        "binary: {f} {f} {f} = {f}",
+                        "{f} {f} {f} = {f}",
                         .{
                             self.ts.fmtType(bin.lhs),
                             bin.op,

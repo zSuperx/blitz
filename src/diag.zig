@@ -77,7 +77,7 @@ pub const DiagnosticList = struct {
         };
     }
 
-    pub fn emit_error(self: *DiagnosticList, comptime fmt: []const u8, args: anytype) void {
+    pub fn emitError(self: *DiagnosticList, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("");
         self.errors += 1;
         self.list.append(self.allocator, .{
@@ -86,7 +86,7 @@ pub const DiagnosticList = struct {
         }) catch @panic("");
     }
 
-    pub fn emit_warning(self: *DiagnosticList, comptime fmt: []const u8, args: anytype) void {
+    pub fn emitWarning(self: *DiagnosticList, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("");
         self.warnings += 1;
         self.list.append(self.allocator, .{

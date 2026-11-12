@@ -1,21 +1,21 @@
 pub const std = @import("std");
 pub const diag = @import("diag.zig");
 pub const sp = @import("interner.zig");
-pub const ezio = @import("ezio.zig");
 pub const ast = @import("ast.zig");
-pub const lexer = @import("lexer.zig");
-pub const parser = @import("parser.zig");
-pub const sema = @import("sema.zig");
 pub const backends = @import("backends.zig");
 pub const types = @import("types.zig");
 pub const state = @import("state.zig");
 
-const Lexer = lexer.Lexer;
-const Parser = parser.Parser;
-const Sema = sema.Sema;
+pub const Lexer = @import("Lexer.zig");
+pub const Parser = @import("Parser.zig");
+pub const Sema = @import("Sema.zig");
+
 
 pub fn main(init: std.process.Init) !void {
-    ezio.initWriters(init.io);
+    const io = init.io;
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
 
     const cfg = try parse_args(init.minimal.args);
 
@@ -41,10 +41,12 @@ pub fn main(init: std.process.Init) !void {
     const alloc = arena.allocator();
 
     state.source_files = .empty;
-    state.diagnostics = .init(init.gpa);
-    const source_id = try state.add_source_file(init.gpa, try state.Source.init(init.gpa, cfg.ifile, bytes));
+    defer state.source_files.deinit(alloc);
+    const source_id = try state.add_source_file(alloc, try state.Source.init(alloc, cfg.ifile, bytes));
 
-    var the_lexer = Lexer.init(alloc);
+    state.diagnostics = .init(alloc);
+
+    var the_lexer: Lexer = .init(alloc);
     const tokens = the_lexer.tokenize(source_id) catch |err| switch (err) {
         error.Diagnostic => undefined,
         else => return err,
@@ -86,14 +88,14 @@ pub fn main(init: std.process.Init) !void {
         .{state.diagnostics.errors},
     );
 
-    if (true) die("TODO: Codegen", .{});
-    var codegen = try backends.llvm.Codegen.init(alloc, the_sema.symbol_table, cfg.ifile);
+    // if (true) die("TODO: Codegen", .{});
+    var codegen = try backends.llvm.Codegen.init(alloc, the_sema.symbol_table, &the_sema.tsys, cfg.ifile);
     const llvm_module_ir = try codegen.gen_program(program);
     // const llvm_module_ir = "TODO";
 
     switch (cfg.ofile) {
         .stdout => {
-            ezio.println("{s}", .{llvm_module_ir});
+            try stdout.print("{s}", .{llvm_module_ir});
             return;
         },
         .file => |file| {
@@ -104,9 +106,11 @@ pub fn main(init: std.process.Init) !void {
             const result = try std.process.run(alloc, init.io, .{
                 .argv = &.{ "clang", "tmp.ll", "-O3", "-o", file },
             });
-            _ = result;
-
-            // try cwd.deleteFile(init.io, "tmp.ll");
+            if (result.term.exited == 0) {
+                // try cwd.deleteFile(init.io, "tmp.ll");
+            } else {
+                std.log.err("Error calling `clang`:\n{s}\n", .{result.stderr});
+            }
         },
     }
 

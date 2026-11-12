@@ -13,8 +13,11 @@ pub const TokenKind = union(enum) {
     const_,
     mut,
     if_,
+    then,
     else_,
     while_,
+    true_,
+    false_,
 
     // Punctuation
     percent,
@@ -24,6 +27,8 @@ pub const TokenKind = union(enum) {
     rparen,
     lcurly,
     rcurly,
+    lbrack,
+    rbrack,
     comma,
     plus,
     minus,
@@ -55,19 +60,22 @@ pub const TokenKind = union(enum) {
 };
 
 pub const TokenMapping = struct { text: []const u8, kind: TokenKind };
-pub const keywords: [7]TokenMapping = [_]TokenMapping{
+pub const keywords: [10]TokenMapping = [_]TokenMapping{
     .{ .text = "const", .kind = .const_ },
     .{ .text = "mut", .kind = .mut },
     .{ .text = "fn", .kind = .fn_ },
     .{ .text = "if", .kind = .if_ },
+    .{ .text = "then", .kind = .then },
     .{ .text = "else", .kind = .else_ },
     .{ .text = "return", .kind = .return_ },
     .{ .text = "while", .kind = .while_ },
+    .{ .text = "true", .kind = .true_ },
+    .{ .text = "false", .kind = .false_ },
 };
 
 pub const Punctuator = struct { name: []const u8, kind: TokenKind };
 pub const MAX_PUNCT_LEN = 2;
-pub const punctuators: [32]TokenMapping = [_]TokenMapping{
+pub const punctuators: [34]TokenMapping = [_]TokenMapping{
     .{ .text = "+=", .kind = .plus_eq },
     .{ .text = "-=", .kind = .minus_eq },
     .{ .text = "*=", .kind = .star_eq },
@@ -89,6 +97,8 @@ pub const punctuators: [32]TokenMapping = [_]TokenMapping{
     .{ .text = ")", .kind = .rparen },
     .{ .text = "{", .kind = .lcurly },
     .{ .text = "}", .kind = .rcurly },
+    .{ .text = "[", .kind = .lbrack },
+    .{ .text = "]", .kind = .rbrack },
     .{ .text = ",", .kind = .comma },
     .{ .text = "+", .kind = .plus },
     .{ .text = "-", .kind = .minus },

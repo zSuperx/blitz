@@ -1,15 +1,16 @@
 const std = @import("std");
 const diag = @import("diag.zig");
 const interner = @import("interner.zig");
-const sema = @import("sema.zig");
 const types = @import("types.zig");
+
 const Type = types.Type;
+const Sema = @import("Sema.zig");
 
 // Interned items
 const String = interner.String;
 const ConcreteTypeId = interner.ConcreteTypeId;
 
-const Symbol = sema.Symbol;
+const Symbol = Sema.Symbol;
 
 // ====================================================
 // Top level AST nodes
@@ -135,7 +136,7 @@ pub const Expr = struct {
 
     pub fn is_lvalue(self: *Expr) bool {
         return switch (self.kind) {
-            .variable => true,
+            .variable, .deref, .index => true,
             else => false,
         };
     }
@@ -143,6 +144,7 @@ pub const Expr = struct {
 
 pub const ExprKind = union(enum) {
     number: u128,
+    bool: bool,
     variable: VarRef,
     binary: BinExpr,
     cmp: CmpExpr,
@@ -150,10 +152,26 @@ pub const ExprKind = union(enum) {
     unary: UnExpr,
     call: CallExpr,
     return_: ReturnExpr,
+    deref: DerefExpr,
+    addr_of: AddrOfExpr,
+    index: IndexExpr,
 
     // These expressions evaluate to their children
     block: BlockExpr,
     ifelse: IfElseExpr,
+};
+
+pub const IndexExpr = struct {
+    base: *Expr,
+    index: *Expr,
+};
+
+pub const AddrOfExpr = struct {
+    target: *Expr,
+};
+
+pub const DerefExpr = struct {
+    target: *Expr,
 };
 
 pub const ReturnExpr = struct {
@@ -233,7 +251,7 @@ pub const LogicOp = enum {
     ) std.Io.Writer.Error!void {
         const s = switch (self) {
             .eq => "==",
-            .ne => "!="
+            .ne => "!=",
         };
         try writer.writeAll(s);
     }
@@ -284,4 +302,15 @@ pub const BinOp = enum {
 pub const UnOp = enum {
     negate,
     not,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        const s = switch (self) {
+            .negate => "-",
+            .not => "!",
+        };
+        try writer.writeAll(s);
+    }
 };
