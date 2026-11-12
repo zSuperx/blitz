@@ -28,12 +28,11 @@ upfront.
 ```
 const x = 5;
 mut y = 8;
-y = 4;
-x = 2; // This causes an error, as shown below
+x = 2;
 ```
 
 This verbosity allows the compiler to catch bugs in your code, like writing to
-a `const` variable:
+a `const` variable, or unnecessary mutability:
 
 ```
 error: Cannot assign to const variable `x`. Consider changing it to be `mut`. 
@@ -42,23 +41,31 @@ test.bl:2:5:
             ^~~~~~~
 
 
+warning: Variable `y` does not need to be mutable. Consider changing it to be `const`. 
+test.bl:3:5:
+            mut y = 8;
+            ^~~~~
+
+
 error: Could not compile program due to 1 errors
 ```
 
 ### Expressions
 
-Blitz, like Rust, is mostly expression-based. In fact, there is currently only
-1 true statement: the assignment (technically 2 if we distinguish variable
-declarations and variable assignments). Unlike C, assignments to a variable (`x
-= 5`) do **not** evaluate to a value. However, nearly every other line of code
-is an expression.
+Blitz, like Rust, is mostly expression-based. Most lines of code produce a
+value, with some exceptions (variable declarations, assignments, and standalone
+`if`s). Let's take a look at what kind of expressions there are.
+
+> [!TIP]
+> Most expressions can be turned into statments by appending a `;`. This
+> discards their value (aka makes the line evaluate to `void`).
 
 #### Blocks
 
 All block scopes `{ ... }` are expressions that evaluate to their last line,
 making code like the following valid.
 
-```
+```zig
 const x = {
     const a = 34;
     const b = 35;
@@ -66,6 +73,9 @@ const x = {
 };
 // x will evaluate to 69
 ```
+
+If a block does not have a tail expression (either it's empty or it only
+contains statements), it's type is `void`.
 
 #### If Else
 
@@ -77,22 +87,43 @@ Rust's verbose `{...}` branch syntax. However, the condition can be negated
 using a special case `!` outside the `()` for ease of readability and
 modification.
 
-```
+```zig
 const x = if (foo) bar else baz;
 const y = if !(foo) bar else baz;
 ```
 
 Because an `if else` can be bound to a variable, whose type must be known at
 compile-time, both branches of the `if else` must have the same type. However,
-this restriction is lifted if the `if else` expression is being used as a
-_statement_, like below:
+this restriction is lifted if the `if else` expression is being _used as a
+statement_, like below:
+
+```zig
+if (foo)
+    makeInt()
+else
+    makeBool();
+```
+
+This can be useful (aka doesn't get in the way) when you want to conditionally
+run effectful functions that have different return types. No need to open a new
+scope!
+
+While we're here, I should also mention: the standalone `if` is a statement,
+not an expression. Attempting to use it like an expression will cause Blitz to
+throw an error:
+
+```zig
+const x = if (true) 5;
+```
 
 ```
-if (foo) {
-    functionThatReturnsBool()
-} else {
-    functionThatReturnsInt()
-}
+error: This `if` is being used as an expression, so it must have an else branch. 
+test.bl:2:15:
+            const x = if (true) 5;
+                      ^~~~~~~~~~~
+
+
+error: Could not compile program due to 1 errors
 ```
 
 ### Functions
@@ -104,7 +135,7 @@ Now, let's use what we've learned so far to write a function!
 Functions can be defined using the familiar `fn` syntax, followed by its name,
 typed arguments, and a trailing return type:
 
-```
+```zig
 fn max(a: i32, b: i32): i32 {
     // ...
 }
@@ -115,7 +146,7 @@ fn do_nothing() {} // omitting a return type implies the function returns `void`
 To return a value, we can use the `return` keyword. The returned value must
 match the type the function expects.
 
-```
+```zig
 fn max(a: i32, b: i32): i32 {
     return if (a > b) a else b;
 }
@@ -134,7 +165,7 @@ test.bl:2:5:
 Because the function body itself is a block, and blocks evaluate to their final
 expression, the `return` can actually be omitted here!
 
-```
+```zig
 fn max(a: i32, b: i32): i32 {
     if (a > b) a else b
 }
@@ -147,7 +178,7 @@ Perfec! Now that we've written our first function, let's call it!
 Calling functions is pretty straightforward. We must provide the correct
 number of arguments _and_ the correct type for each argument:
 
-```
+```zig
 fn max(a: i32, b: i32): i32 {
     if (a > b) a else b
 }
@@ -222,10 +253,13 @@ due to their direct relationship to `x`, making all 3 of them resolve to `i32`.
 However, `w` has no constraints other than the fact that it's an integer, so it
 is assigned the type `u32`.
 
-> [!NOTE] The type inference is in a very early stage. It's the first type
-> inference engine I've ever written, so there are bound to be bugs!
+
+> [!NOTE]
+> The type inference is in a very early stage. It's the first type inference
+> engine I've ever written, so there are bound to be bugs!
 > 
-> I also plan to add type variables and a concept of generic types in the future!
+> I also plan to add type variables and a concept of generic types in the
+> future!
 
 #### Builtin Types
 
@@ -239,8 +273,9 @@ The Blitz compiler currently recognizes the following builtin types:
 Also, pointers exist. _(Not much to say here since I'm still designing this
 part of the language lol)_
 
-_(The `isize` and `usize` types are meant to conform to the system address
-width, but for the time being, they are hard-coded to `64` bits.)_
+> [!WARN]
+> The `isize` and `usize` types are meant to conform to the system address
+> width, but for the time being, they are hard-coded to `64` bits.
 
 #### Custom Types
 

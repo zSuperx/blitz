@@ -478,6 +478,7 @@ fn parse_stmt(self: *@This()) ParseError!*ast.Stmt {
                         .right = right,
                     },
                 };
+                _ = try self.expect_tok(.semicolon);
             } else {
                 kind = .{ .expr = expr };
             }
@@ -499,6 +500,7 @@ fn parse_decl_stmt(self: *@This()) !ast.DeclStmt {
 
         expr = try self.parse_expr();
     }
+    _ = try self.expect_tok(.semicolon);
 
     return .{
         .decl = spec,
