@@ -107,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
                 .argv = &.{ "clang", "tmp.ll", "-O3", "-o", file },
             });
             if (result.term.exited == 0) {
-                // try cwd.deleteFile(init.io, "tmp.ll");
+                try cwd.deleteFile(init.io, "tmp.ll");
             } else {
                 std.log.err("Error calling `clang`:\n{s}\n", .{result.stderr});
             }

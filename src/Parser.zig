@@ -323,9 +323,24 @@ fn parse_infix_expr(self: *@This(), lhs: *ast.Expr, op: Token, op_power: usize) 
             };
         },
         .eq2, .bang_eq => { // Logical
-            const logicop: ast.LogicOp = switch (op.kind) {
+            const eqop: ast.EqualityOp = switch (op.kind) {
                 .eq2 => .eq,
                 .bang_eq => .ne,
+                else => unreachable,
+            };
+
+            kind = .{
+                .equality = .{
+                    .op = eqop,
+                    .left = lhs,
+                    .right = try self.parse_expr_1(op_power),
+                },
+            };
+        },
+        .amp2, .pipe2 => { // Logical
+            const logicop: ast.LogicOp = switch (op.kind) {
+                .amp2 => .and_,
+                .pipe2 => .or_,
                 else => unreachable,
             };
 

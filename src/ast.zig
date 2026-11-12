@@ -38,13 +38,6 @@ pub const TypeRef = struct {
     },
 };
 
-pub const VarDecl = struct {
-    span: diag.Span,
-    variable: VarRef,
-    mutable: bool,
-    ty: ?*TypeRef,
-};
-
 pub const VarRef = struct {
     text: String,
     symbol: Symbol = .invalid,
@@ -56,6 +49,13 @@ pub const VarRef = struct {
     ) std.Io.Writer.Error!void {
         try writer.print("{f}.{f}", .{ self.text, self.symbol });
     }
+};
+
+pub const VarDecl = struct {
+    span: diag.Span,
+    variable: VarRef,
+    mutable: bool,
+    ty: ?*TypeRef,
 };
 
 // ====================================================
@@ -149,6 +149,7 @@ pub const ExprKind = union(enum) {
     binary: BinExpr,
     cmp: CmpExpr,
     logic: LogicExpr,
+    equality: EqualityExpr,
     unary: UnExpr,
     call: CallExpr,
     return_: ReturnExpr,
@@ -159,6 +160,11 @@ pub const ExprKind = union(enum) {
     // These expressions evaluate to their children
     block: BlockExpr,
     ifelse: IfElseExpr,
+};
+
+pub const TypeCastExpr = struct {
+    newty: *TypeRef,
+    target: *Expr,
 };
 
 pub const IndexExpr = struct {
@@ -207,6 +213,12 @@ pub const CmpExpr = struct {
     right: *Expr,
 };
 
+pub const EqualityExpr = struct {
+    op: EqualityOp,
+    left: *Expr,
+    right: *Expr,
+};
+
 pub const LogicExpr = struct {
     op: LogicOp,
     left: *Expr,
@@ -241,7 +253,7 @@ pub const AssignOp = enum {
     assign_mod,
 };
 
-pub const LogicOp = enum {
+pub const EqualityOp = enum {
     eq,
     ne,
 
@@ -252,6 +264,22 @@ pub const LogicOp = enum {
         const s = switch (self) {
             .eq => "==",
             .ne => "!=",
+        };
+        try writer.writeAll(s);
+    }
+};
+
+pub const LogicOp = enum {
+    and_,
+    or_,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        const s = switch (self) {
+            .and_ => "&&",
+            .or_ => "||",
         };
         try writer.writeAll(s);
     }

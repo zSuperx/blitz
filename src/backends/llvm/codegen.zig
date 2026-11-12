@@ -151,6 +151,7 @@ pub const Codegen = struct {
             .block => self.gen_block_expr(expr),
             .ifelse => self.gen_if_else_expr(expr),
             .logic => self.gen_logic_expr(expr),
+            .equality => self.gen_equality_expr(expr),
             .cmp => self.gen_cmp_expr(expr),
             .return_ => self.gen_return_expr(expr),
             .addr_of => self.gen_addr_of_expr(expr),
@@ -344,6 +345,18 @@ pub const Codegen = struct {
         }
     }
 
+    fn gen_equality_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
+        const equality = &expr.kind.equality;
+
+        const left_value = try self.gen_expr_rvalue(equality.left);
+        const right_value = try self.gen_expr_rvalue(equality.right);
+
+        switch (equality.op) {
+            .eq => return core.LLVMBuildICmp(self.builder, .LLVMIntEQ, left_value, right_value, "").?,
+            .ne => return core.LLVMBuildICmp(self.builder, .LLVMIntNE, left_value, right_value, "").?,
+        }
+    }
+
     fn gen_logic_expr(self: *Codegen, expr: *ast.Expr) !LLVMValueRef {
         const logic = &expr.kind.logic;
 
@@ -351,8 +364,10 @@ pub const Codegen = struct {
         const right_value = try self.gen_expr_rvalue(logic.right);
 
         switch (logic.op) {
-            .eq => return core.LLVMBuildICmp(self.builder, .LLVMIntEQ, left_value, right_value, "").?,
-            .ne => return core.LLVMBuildICmp(self.builder, .LLVMIntNE, left_value, right_value, "").?,
+            // .eq => return core.LLVMBuildICmp(self.builder, .LLVMIntEQ, left_value, right_value, "").?,
+            // .ne => return core.LLVMBuildICmp(self.builder, .LLVMIntNE, left_value, right_value, "").?,
+            .and_ => return core.LLVMBuildAnd(self.builder, left_value, right_value, "").?,
+            .or_ => return core.LLVMBuildOr(self.builder, left_value, right_value, "").?,
         }
     }
 

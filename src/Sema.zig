@@ -311,6 +311,7 @@ fn sema_expr(self: *@This(), expr: *ast.Expr) SemaError!void {
         .call => try self.sema_call_expr(expr),
         .ifelse => try self.sema_if_else_expr(expr),
         .logic => try self.sema_logic_expr(expr),
+        .equality => try self.sema_equality_expr(expr),
         .cmp => try self.sema_cmp_expr(expr),
         .return_ => try self.sema_return_expr(expr),
         .deref => try self.sema_deref_expr(expr),
@@ -489,6 +490,27 @@ fn sema_block_expr(self: *@This(), expr: *ast.Expr) !void {
     self.pop_scope();
 }
 
+fn sema_equality_expr(self: *@This(), expr: *ast.Expr) !void {
+    const equality = &expr.kind.equality;
+    try self.sema_expr(equality.left);
+    try self.sema_expr(equality.right);
+    self.tsys.createConstraint(.{
+        .equal = &.{
+            equality.left.ty.?,
+            equality.right.ty.?,
+        },
+    }) catch {
+        state.diagnostics.emitError("`{f}` can only performed between same types. Got `{f}` and `{f}` {f}", .{
+            equality.op,
+            self.tsys.fmtType(equality.left.ty.?),
+            self.tsys.fmtType(equality.right.ty.?),
+            expr.span,
+        });
+        return error.Fatal;
+    };
+    expr.ty = builtins.bool_;
+}
+
 fn sema_logic_expr(self: *@This(), expr: *ast.Expr) !void {
     const logic = &expr.kind.logic;
     try self.sema_expr(logic.left);
@@ -500,7 +522,7 @@ fn sema_logic_expr(self: *@This(), expr: *ast.Expr) !void {
             builtins.bool_,
         },
     }) catch {
-        state.diagnostics.emitError("`{f}` can only performed between same types. Got `{f}` and `{f}` {f}", .{
+        state.diagnostics.emitError("`{f}` can only performed between booleans. Got `{f}` and `{f}` {f}", .{
             logic.op,
             self.tsys.fmtType(logic.left.ty.?),
             self.tsys.fmtType(logic.right.ty.?),
@@ -569,12 +591,14 @@ fn sema_unary_expr(self: *@This(), expr: *ast.Expr) !void {
     try self.sema_expr(unary.inner);
 
     expr.ty = switch (unary.op) {
-        .negate => try self.tsys.createUnknownType(.empty),
+        .negate => brk: {
+            const ty = try self.tsys.createUnknownType(.empty);
+            try self.tsys.addProperty(ty, .numeric);
+            try self.tsys.addProperty(ty, .signed);
+            break :brk ty;
+        },
         .not => builtins.bool_,
     };
-
-    try self.tsys.addProperty(expr.ty.?, .numeric);
-    try self.tsys.addProperty(expr.ty.?, .signed);
 
     self.tsys.createConstraint(.{
         .unary = .{

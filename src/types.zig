@@ -347,7 +347,7 @@ pub const TypeSystem = struct {
         switch (entry.kind) {
             .concrete => {
                 if (!self.satisfiesProperty(ty, property)) {
-                    state.diagnostics.emitError("`{f}` does not satisfy the property: {s}", .{
+                    state.diagnostics.emitError("`{f}` does not satisfy the `{s}` property", .{
                         self.fmtType(ty),
                         @tagName(property),
                     });
