@@ -1,5 +1,4 @@
 const std = @import("std");
-const ezio = @import("ezio.zig");
 const state = @import("state.zig");
 
 pub const Span = struct {

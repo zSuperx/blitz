@@ -81,9 +81,9 @@ pub const SemaError = error{
 };
 
 // These are carried out through the whole compiler
-allocator: std.mem.Allocator,
-string_pool: *StringPool,
-tsys: types.TypeSystem,
+gpa: std.mem.Allocator,
+sp: *StringPool,
+ts: types.TypeSystem,
 // TODO: inherit this from init, use through whole program
 symbol_table: std.AutoHashMap(Symbol, SymbolInfo),
 
@@ -93,10 +93,10 @@ scopes: std.ArrayList(std.AutoHashMap(String, Symbol)),
 
 pub fn init(allocator: std.mem.Allocator, string_pool: *StringPool) !@This() {
     var sema = @This(){
-        .allocator = allocator,
-        .string_pool = string_pool,
+        .gpa = allocator,
+        .sp = string_pool,
         .scopes = .empty,
-        .tsys = .init(allocator),
+        .ts = .init(allocator),
         .symbol_table = .init(allocator),
     };
     try sema.scopes.append(allocator, .init(allocator));
@@ -111,7 +111,7 @@ pub fn init(allocator: std.mem.Allocator, string_pool: *StringPool) !@This() {
 //
 
 fn create_pointer_to(self: *@This(), pointee: Type) !Type {
-    return try self.tsys.createConcreteType(.{ .pointer = .{ .points_to = pointee } });
+    return try self.ts.createConcreteType(.{ .pointer = .{ .points_to = pointee } });
 }
 
 fn next_id(self: *@This()) Symbol {
@@ -121,7 +121,7 @@ fn next_id(self: *@This()) Symbol {
 
 fn get_current_function_type(self: *@This()) @FieldType(types.CTy, "function") {
     const ftype = self.symbol_table.getPtr(self.current_function).?.ty;
-    return self.tsys.getConcreteType(ftype).?.function;
+    return self.ts.getConcreteType(ftype).?.function;
 }
 
 fn get_binding_info(self: *@This(), name: String) ?*SymbolInfo {
@@ -135,7 +135,7 @@ pub fn add_type_binding(
     name: String,
     ct: CTy,
 ) !Type {
-    const resolved = try self.tsys.createConcreteType(ct);
+    const resolved = try self.ts.createConcreteType(ct);
 
     const symbol = self.next_id();
     try self.symbol_table.put(
@@ -174,7 +174,7 @@ fn add_function_binding(
     try self.symbol_table.put(
         symbol,
         .{
-            .ty = try self.tsys.createConcreteType(
+            .ty = try self.ts.createConcreteType(
                 .{
                     .function = .{
                         .args = args,
@@ -258,7 +258,7 @@ fn get_binding(self: *@This(), ident: String) ?Symbol {
 }
 
 fn push_scope(self: *@This()) !void {
-    try self.scopes.append(self.allocator, .init(self.allocator));
+    try self.scopes.append(self.gpa, .init(self.gpa));
 }
 
 fn pop_scope(self: *@This()) void {
@@ -269,7 +269,7 @@ fn resolve_type_reference(self: *@This(), ty: *ast.TypeRef) !Type {
     switch (ty.kind) {
         .pointer => |inner| {
             const i = try self.resolve_type_reference(inner);
-            return try self.tsys.createConcreteType(
+            return try self.ts.createConcreteType(
                 .{ .pointer = .{ .points_to = i } },
             );
         },
@@ -325,29 +325,29 @@ fn sema_index_expr(self: *@This(), expr: *ast.Expr) !void {
     const index = expr.kind.index;
     try self.sema_expr(index.base);
     try self.sema_expr(index.index);
-    self.tsys.createConstraint(.{
+    self.ts.createConstraint(.{
         .equal = &.{
             index.index.ty.?,
             builtins.usize_,
         },
     }) catch {
         state.diagnostics.emitError("Indexing expects type `usize`, but got `{f}` {f}", .{
-            self.tsys.fmtType(index.index.ty.?),
+            self.ts.fmtType(index.index.ty.?),
             index.index.span,
         });
         return error.Fatal;
     };
 
-    expr.ty = try self.tsys.createUnknownType(.empty);
+    expr.ty = try self.ts.createUnknownType(.empty);
 
-    self.tsys.createConstraint(.{
+    self.ts.createConstraint(.{
         .pointer = .{
             .pointer = index.base.ty.?,
             .points_to = expr.ty.?,
         },
     }) catch {
         state.diagnostics.emitError("Cannot index into non-pointer type `{f}` {f}", .{
-            self.tsys.fmtType(index.base.ty.?),
+            self.ts.fmtType(index.base.ty.?),
             index.index.span,
         });
         return error.Fatal;
@@ -357,15 +357,15 @@ fn sema_index_expr(self: *@This(), expr: *ast.Expr) !void {
 fn sema_deref_expr(self: *@This(), expr: *ast.Expr) !void {
     const deref = expr.kind.deref;
     try self.sema_expr(deref.target);
-    expr.ty = try self.tsys.createUnknownType(.empty);
-    self.tsys.createConstraint(.{
+    expr.ty = try self.ts.createUnknownType(.empty);
+    self.ts.createConstraint(.{
         .pointer = .{
             .pointer = deref.target.ty.?,
             .points_to = expr.ty.?,
         },
     }) catch {
         state.diagnostics.emitError("Cannot dereference non-pointer type `{f}` {f}", .{
-            self.tsys.fmtType(deref.target.ty.?),
+            self.ts.fmtType(deref.target.ty.?),
             deref.target.span,
         });
         return error.Fatal;
@@ -383,7 +383,7 @@ fn sema_addr_of_expr(self: *@This(), expr: *ast.Expr) !void {
         return error.Fatal;
     }
     expr.ty = try self.create_pointer_to(addr_of.target.ty.?);
-    self.tsys.createConstraint(.{
+    self.ts.createConstraint(.{
         .pointer = .{
             .pointer = expr.ty.?,
             .points_to = addr_of.target.ty.?,
@@ -405,8 +405,8 @@ fn sema_bool_expr(self: *@This(), expr: *ast.Expr) !void {
 }
 
 fn sema_number_expr(self: *@This(), expr: *ast.Expr) !void {
-    expr.ty = try self.tsys.createUnknownType(.initOne(.numeric));
-    self.tsys.createConstraint(.{ .numeric = expr.ty.? }) catch {
+    expr.ty = try self.ts.createUnknownType(.initOne(.numeric));
+    self.ts.createConstraint(.{ .numeric = expr.ty.? }) catch {
         state.diagnostics.emitError("Not a number. {f}", .{expr.span});
         return error.Fatal;
     };
@@ -419,14 +419,14 @@ fn sema_if_else_expr(self: *@This(), expr: *ast.Expr) !void {
 
     // TODO: type check cond to be bool
     try self.sema_expr(cond);
-    self.tsys.createConstraint(.{ .equal = &.{
+    self.ts.createConstraint(.{ .equal = &.{
         cond.ty.?,
         builtins.bool_,
     } }) catch {
         state.diagnostics.emitError(
             "Conditional expressions must be `bool`, but this is of type `{f}`. {f}",
             .{
-                self.tsys.fmtType(cond.ty.?),
+                self.ts.fmtType(cond.ty.?),
                 cond.span,
             },
         );
@@ -442,7 +442,7 @@ fn sema_if_else_expr(self: *@This(), expr: *ast.Expr) !void {
     } else {
         if (if_else.else_) |else_| {
             try self.sema_expr(else_);
-            self.tsys.createConstraint(.{
+            self.ts.createConstraint(.{
                 .equal = &.{
                     then.ty.?,
                     else_.ty.?,
@@ -454,9 +454,9 @@ fn sema_if_else_expr(self: *@This(), expr: *ast.Expr) !void {
                     \\the `else` branch has type `{f}` {f}
                 ,
                     .{
-                        self.tsys.fmtType(then.ty.?),
+                        self.ts.fmtType(then.ty.?),
                         then.span,
-                        self.tsys.fmtType(else_.ty.?),
+                        self.ts.fmtType(else_.ty.?),
                         else_.span,
                     },
                 );
@@ -494,7 +494,7 @@ fn sema_equality_expr(self: *@This(), expr: *ast.Expr) !void {
     const equality = &expr.kind.equality;
     try self.sema_expr(equality.left);
     try self.sema_expr(equality.right);
-    self.tsys.createConstraint(.{
+    self.ts.createConstraint(.{
         .equal = &.{
             equality.left.ty.?,
             equality.right.ty.?,
@@ -502,8 +502,8 @@ fn sema_equality_expr(self: *@This(), expr: *ast.Expr) !void {
     }) catch {
         state.diagnostics.emitError("`{f}` can only performed between same types. Got `{f}` and `{f}` {f}", .{
             equality.op,
-            self.tsys.fmtType(equality.left.ty.?),
-            self.tsys.fmtType(equality.right.ty.?),
+            self.ts.fmtType(equality.left.ty.?),
+            self.ts.fmtType(equality.right.ty.?),
             expr.span,
         });
         return error.Fatal;
@@ -515,7 +515,7 @@ fn sema_logic_expr(self: *@This(), expr: *ast.Expr) !void {
     const logic = &expr.kind.logic;
     try self.sema_expr(logic.left);
     try self.sema_expr(logic.right);
-    self.tsys.createConstraint(.{
+    self.ts.createConstraint(.{
         .equal = &.{
             logic.left.ty.?,
             logic.right.ty.?,
@@ -524,8 +524,8 @@ fn sema_logic_expr(self: *@This(), expr: *ast.Expr) !void {
     }) catch {
         state.diagnostics.emitError("`{f}` can only performed between booleans. Got `{f}` and `{f}` {f}", .{
             logic.op,
-            self.tsys.fmtType(logic.left.ty.?),
-            self.tsys.fmtType(logic.right.ty.?),
+            self.ts.fmtType(logic.left.ty.?),
+            self.ts.fmtType(logic.right.ty.?),
             expr.span,
         });
         return error.Fatal;
@@ -537,7 +537,7 @@ fn sema_cmp_expr(self: *@This(), expr: *ast.Expr) !void {
     const cmp = &expr.kind.cmp;
     try self.sema_expr(cmp.left);
     try self.sema_expr(cmp.right);
-    self.tsys.createConstraint(.{
+    self.ts.createConstraint(.{
         .equal = &.{
             cmp.left.ty.?,
             cmp.right.ty.?,
@@ -545,8 +545,8 @@ fn sema_cmp_expr(self: *@This(), expr: *ast.Expr) !void {
     }) catch {
         state.diagnostics.emitError("`{f}` can only performed between same types. Got `{f}` and `{f}` {f}", .{
             cmp.op,
-            self.tsys.fmtType(cmp.left.ty.?),
-            self.tsys.fmtType(cmp.right.ty.?),
+            self.ts.fmtType(cmp.left.ty.?),
+            self.ts.fmtType(cmp.right.ty.?),
             expr.span,
         });
         return error.Fatal;
@@ -562,9 +562,9 @@ fn sema_binary_expr(self: *@This(), expr: *ast.Expr) !void {
     try self.sema_expr(left);
     try self.sema_expr(right);
 
-    const out_ty = try self.tsys.createUnknownType(.initOne(.numeric));
+    const out_ty = try self.ts.createUnknownType(.initOne(.numeric));
 
-    self.tsys.createConstraint(
+    self.ts.createConstraint(
         .{
             .binary = .{
                 .op = binary.op,
@@ -576,8 +576,8 @@ fn sema_binary_expr(self: *@This(), expr: *ast.Expr) !void {
     ) catch {
         state.diagnostics.emitError("Operator `{f}` can only be used between same integral types. Got `{f}` and `{f}`. {f}", .{
             binary.op,
-            self.tsys.fmtType(left.ty.?),
-            self.tsys.fmtType(right.ty.?),
+            self.ts.fmtType(left.ty.?),
+            self.ts.fmtType(right.ty.?),
             expr.span,
         });
         return error.Fatal;
@@ -592,15 +592,15 @@ fn sema_unary_expr(self: *@This(), expr: *ast.Expr) !void {
 
     expr.ty = switch (unary.op) {
         .negate => brk: {
-            const ty = try self.tsys.createUnknownType(.empty);
-            try self.tsys.addProperty(ty, .numeric);
-            try self.tsys.addProperty(ty, .signed);
+            const ty = try self.ts.createUnknownType(.empty);
+            try self.ts.addProperty(ty, .numeric);
+            try self.ts.addProperty(ty, .signed);
             break :brk ty;
         },
         .not => builtins.bool_,
     };
 
-    self.tsys.createConstraint(.{
+    self.ts.createConstraint(.{
         .unary = .{
             .op = unary.op,
             .in = unary.inner.ty.?,
@@ -609,7 +609,7 @@ fn sema_unary_expr(self: *@This(), expr: *ast.Expr) !void {
     }) catch {
         state.diagnostics.emitError("The `{f}` operator can't be used on expressions of type `{f}`. {f}", .{
             unary.op,
-            self.tsys.fmtType(unary.inner.ty.?),
+            self.ts.fmtType(unary.inner.ty.?),
             expr.span,
         });
         return error.Fatal;
@@ -642,11 +642,11 @@ fn sema_call_expr(self: *@This(), expr: *ast.Expr) !void {
 
     try self.sema_expr(call.callee);
 
-    const callee_type = if (self.tsys.getConcreteType(call.callee.ty.?)) |f| f else {
+    const callee_type = if (self.ts.getConcreteType(call.callee.ty.?)) |f| f else {
         state.diagnostics.emitError(
             "Cannot call non-function type `{f}`. {f}",
             .{
-                self.tsys.fmtType(call.callee.ty.?),
+                self.ts.fmtType(call.callee.ty.?),
                 call.callee.span,
             },
         );
@@ -655,11 +655,11 @@ fn sema_call_expr(self: *@This(), expr: *ast.Expr) !void {
 
     const function_type = switch (callee_type) {
         .pointer => |p| brk: {
-            const inner_ty = self.tsys.getConcreteType(p.points_to) orelse {
+            const inner_ty = self.ts.getConcreteType(p.points_to) orelse {
                 state.diagnostics.emitError(
                     "Cannot call non-function type `{f}`. {f}",
                     .{
-                        self.tsys.fmtType(call.callee.ty.?),
+                        self.ts.fmtType(call.callee.ty.?),
                         call.callee.span,
                     },
                 );
@@ -672,7 +672,7 @@ fn sema_call_expr(self: *@This(), expr: *ast.Expr) !void {
             state.diagnostics.emitError(
                 "Cannot call non-function type `{f}`. {f}",
                 .{
-                    self.tsys.fmtType(call.callee.ty.?),
+                    self.ts.fmtType(call.callee.ty.?),
                     call.callee.span,
                 },
             );
@@ -688,7 +688,7 @@ fn sema_call_expr(self: *@This(), expr: *ast.Expr) !void {
     try self.sema_variable_expr(call.callee);
     for (call.args, function_type.args) |arg, expected| {
         try self.sema_expr(arg);
-        self.tsys.createConstraint(.{
+        self.ts.createConstraint(.{
             .equal = &.{
                 arg.ty.?,
                 expected,
@@ -697,8 +697,8 @@ fn sema_call_expr(self: *@This(), expr: *ast.Expr) !void {
             state.diagnostics.emitError(
                 "Incorrect argument type passed to function. Expected `{f}` but got `{f}` {f}",
                 .{
-                    self.tsys.fmtType(expected),
-                    self.tsys.fmtType(arg.ty.?),
+                    self.ts.fmtType(expected),
+                    self.ts.fmtType(arg.ty.?),
                     arg.span,
                 },
             );
@@ -735,10 +735,10 @@ fn sema_assign_stmt(self: *@This(), stmt: *ast.Stmt) !void {
         return error.Fatal;
     }
 
-    _ = self.tsys.unify(left.ty, right.ty) catch {
+    _ = self.ts.unify(left.ty, right.ty) catch {
         state.diagnostics.emitError("Mismatched types: {f} and {f}. {f} {f}", .{
-            self.tsys.fmtType(left.ty.?),
-            self.tsys.fmtType(right.ty.?),
+            self.ts.fmtType(left.ty.?),
+            self.ts.fmtType(right.ty.?),
             left.span,
             right.span,
         });
@@ -766,10 +766,10 @@ fn sema_var_decl_stmt(self: *@This(), stmt: *ast.Stmt) !void {
         try self.sema_expr(expr);
         const info = self.get_binding_info(decl.decl.variable.text).?;
         info.kind.variable.initialized = true;
-        _ = self.tsys.unify(info.ty, expr.ty) catch {
+        _ = self.ts.unify(info.ty, expr.ty) catch {
             state.diagnostics.emitError("Mismatched types: {f} and {f}. {f} {f}", .{
-                self.tsys.fmtType(info.ty),
-                self.tsys.fmtType(expr.ty.?),
+                self.ts.fmtType(info.ty),
+                self.ts.fmtType(expr.ty.?),
                 decl.decl.variable.span,
                 expr.span,
             });
@@ -789,10 +789,10 @@ fn sema_return_expr(self: *@This(), expr: *ast.Expr) !void {
     try self.sema_expr(return_.value);
 
     const function_type = self.get_current_function_type();
-    _ = self.tsys.unify(function_type.returns, return_.value.ty) catch {
+    _ = self.ts.unify(function_type.returns, return_.value.ty) catch {
         state.diagnostics.emitError("Function returns type {f}, but this expression is of type {f} {f}", .{
-            self.tsys.fmtType(function_type.returns),
-            self.tsys.fmtType(return_.value.ty.?),
+            self.ts.fmtType(function_type.returns),
+            self.ts.fmtType(return_.value.ty.?),
             return_.value.span,
         });
         return error.Fatal;
@@ -818,7 +818,7 @@ fn sema_var_decl(self: *@This(), decl: *ast.VarDecl) !void {
     const t = if (decl.ty) |ty|
         try self.resolve_type_reference(ty)
     else
-        try self.tsys.createUnknownType(.empty);
+        try self.ts.createUnknownType(.empty);
 
     const symbol = try self.add_variable_binding(decl.variable.text, t, .{
         .decl_span = decl.span,
@@ -865,10 +865,10 @@ fn sema_function(self: *@This(), function: *ast.Function) SemaError!void {
             );
         }
 
-        _ = self.tsys.unify(tail.ty, function_type.returns) catch {
+        _ = self.ts.unify(tail.ty, function_type.returns) catch {
             state.diagnostics.emitError("Function returns type {f}, but this expression is of type {f} {f}", .{
-                self.tsys.fmtType(function_type.returns),
-                self.tsys.fmtType(tail.ty.?),
+                self.ts.fmtType(function_type.returns),
+                self.ts.fmtType(tail.ty.?),
                 tail.span,
             });
             return error.Fatal;
@@ -885,7 +885,7 @@ pub fn sema_program(self: *@This(), program: *ast.Program) SemaError!void {
         var args: std.ArrayList(Type) = .empty;
         for (function.arguments) |*decl| {
             const t = try self.resolve_type_reference(decl.ty.?);
-            try args.append(self.allocator, t);
+            try args.append(self.gpa, t);
         }
 
         const returns: Type =
@@ -910,7 +910,7 @@ pub fn sema_program(self: *@This(), program: *ast.Program) SemaError!void {
         try self.sema_function(function);
     }
 
-    try self.tsys.solveTypes();
+    try self.ts.solveTypes();
 
     var iter = self.symbol_table.iterator();
     while (iter.next()) |entry| {

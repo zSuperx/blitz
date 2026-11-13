@@ -1,6 +1,5 @@
 const std = @import("std");
 const token = @import("tokens.zig");
-const ezio = @import("ezio.zig");
 const diag = @import("diag.zig");
 const interner = @import("interner.zig");
 const state = @import("state.zig");
@@ -21,7 +20,7 @@ pub const ParseError = error{
     WriteFailed,
 };
 
-string_pool: *StringPool,
+sp: *StringPool,
 tokens: []const Token = undefined,
 cursor: usize = 0,
 gpa: std.mem.Allocator,
@@ -30,7 +29,7 @@ last_token: ?Token = null,
 
 pub fn init(allocator: std.mem.Allocator, string_pool: *StringPool) @This() {
     return .{
-        .string_pool = string_pool,
+        .sp = string_pool,
         .gpa = allocator,
     };
 }
@@ -532,7 +531,7 @@ fn parse_return_expr(self: *@This()) !ast.ReturnExpr {
 fn parse_variable_reference(self: *@This()) !ast.VarRef {
     const name = try self.expect_tok(.ident);
     return .{
-        .text = try self.string_pool.add(name.raw),
+        .text = try self.sp.add(name.raw),
         .span = name.span,
     };
 }

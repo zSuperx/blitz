@@ -34,7 +34,7 @@ pub const builtins = struct {
 
     pub fn init(s: *Sema) !void {
         // Register this first if other builtin types need it.
-        type_ = try s.tsys.createConcreteType(.type);
+        type_ = try s.ts.createConcreteType(.type);
 
         const specs = [_]Spec{
             .{ .concrete = .bool, .text = "bool", .handle = &bool_ },
@@ -107,7 +107,7 @@ pub const builtins = struct {
 
         for (specs) |spec| {
             spec.handle.* = try s.add_type_binding(
-                try s.string_pool.add(spec.text),
+                try s.sp.add(spec.text),
                 spec.concrete,
             );
         }

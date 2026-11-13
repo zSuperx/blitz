@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
     );
 
     // if (true) die("TODO: Codegen", .{});
-    var codegen = try backends.llvm.Codegen.init(alloc, the_sema.symbol_table, &the_sema.tsys, cfg.ifile);
+    var codegen = try backends.llvm.Codegen.init(alloc, the_sema.symbol_table, &the_sema.ts, cfg.ifile);
     const llvm_module_ir = try codegen.gen_program(program);
     // const llvm_module_ir = "TODO";
 
